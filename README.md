@@ -38,7 +38,7 @@ python -m DiffusionRWR_model_package.main
 
 Edit parameters in `main.py`:
 
-- `USE_FAST_RWR`: Toggle between fast (Numba) or slow (detailed) RWR
+- `USE_FAST_RWR`: Toggle between fast (Numba) or slow RWR
 - `edge_fn_intra`: Edge weight function for intra-layer connections
 - `edge_fn_inter`: Edge weight function for inter-layer connections
 - `start` / `end`: Basis vectors for start/target nodes
