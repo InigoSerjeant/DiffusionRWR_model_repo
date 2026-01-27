@@ -78,10 +78,6 @@ The pipeline generates an interactive 3D Plotly visualization showing:
 - Basis vectors (start/target points)
 - Sampled random walk trajectories
 
-## License
-
-MIT License
-
 ## Author
 
-Inigo
+Inigo Serjeant
