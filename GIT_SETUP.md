@@ -1,14 +1,25 @@
 # Git Setup Instructions
 
-## Step 1: Commit Your Files
+## Step 1: Initialize and Commit Your Files
 
-Run these commands in PowerShell from the DiffusionRWR_model_repo directory:
+Open Git Bash in the DiffusionRWR_model_repo directory and run:
 
-```powershell
-cd C:\Users\inigo\OneDrive\Documents\Fourth_Year\Computations\Dissertation\DiffusionRWR_model_repo
+```bash
+# Make sure you're in the right directory
+cd /c/Users/inigo/OneDrive/Documents/Fourth_Year/Computations/Dissertation/DiffusionRWR_model_repo
+
+# Initialize git repository (if not already done)
+git init
+
+# Configure git if this is your first time
+git config user.name "Your Name"
+git config user.email "your.email@example.com"
 
 # Stage all files
 git add .
+
+# Check what will be committed
+git status
 
 # Create initial commit
 git commit -m "Initial commit: DiffusionRWR multi-layer graph model"
@@ -25,9 +36,9 @@ git commit -m "Initial commit: DiffusionRWR multi-layer graph model"
 
 ## Step 3: Push to GitHub
 
-GitHub will show you commands. Use these:
+In Git Bash, run these commands:
 
-```powershell
+```bash
 # Add remote (replace YOUR_USERNAME with your GitHub username)
 git remote add origin https://github.com/YOUR_USERNAME/DiffusionRWR_model.git
 
@@ -42,9 +53,9 @@ Visit your repository URL to confirm all files are uploaded!
 
 ## Future Updates
 
-After making changes:
+After making changes, in Git Bash:
 
-```powershell
+```bash
 git add .
 git commit -m "Description of changes"
 git push
