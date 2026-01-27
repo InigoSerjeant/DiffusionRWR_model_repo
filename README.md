@@ -4,7 +4,8 @@ A multi-layer graph random walk model for analyzing biological data trajectories
 
 ## Overview
 
-This package implements a Random Walk with Restart (RWR) model on multi-layer graphs to analyze trajectory patterns in biological time-series data. The model integrates multiple omics layers (histone modifications and RNA expression) to identify important regulatory pathways.
+This package implements a Random Walk with Restart (RWR) model on multi-layer graphs to analyze possible gene causation trajectories that causes a change of cell state.
+
 
 ## Features
 
