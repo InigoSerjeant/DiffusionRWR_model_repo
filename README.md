@@ -83,4 +83,4 @@ The pipeline generates an interactive 3D Plotly visualization showing:
 
 ## Author
 
-Inigo
+Inigo Serjeant
