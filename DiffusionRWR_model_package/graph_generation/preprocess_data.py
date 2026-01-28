@@ -4,14 +4,14 @@ import os
 import glob
 from pathlib import Path
 
-def load_data(folder_name="Modelled"):
+def load_data(folder_path):
     """
     Load all CSV files from the specified data folder.
     
     Parameters:
     -----------
-    folder_name : str
-        Name of the folder within the package's data directory (default: "Modelled")
+    folder_path : str or Path
+        Path to the folder containing the CSV files
     
     Returns:
     --------
@@ -19,9 +19,6 @@ def load_data(folder_name="Modelled"):
         Dictionary with dataset names as keys and pandas DataFrames as values
     """
 
-    folder_path = r"C:\Users\inigo\OneDrive\Documents\Fourth_Year\Computations\Dissertation\DiffusionRWR_model_repo\DiffusionRWR_model_package\data\Modelled"
-    
-    # Convert to string for compatibility with glob
     folder_path = str(folder_path)
     
     # Get all CSV files

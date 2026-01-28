@@ -29,6 +29,7 @@ start='e3'
 end='e5'
 restart_prob=0.01
 n_simulations=1000
+folder_path = r"C:\Users\inigo\OneDrive\Documents\Fourth_Year\Computations\Dissertation\DiffusionRWR_model_repo\DiffusionRWR_model_package\data\Modelled"
 
 
 
@@ -42,7 +43,7 @@ def main():
     
     # Step 1: Load data from modelled folder
     print("\n[STEP 1] Loading data...")
-    data_dict = load_data(folder_name="Modelled")
+    data_dict = load_data(folder_path)
     
     # Clean up dataset names to remove prefixes and suffixes
     cleaned_data_dict = {}
