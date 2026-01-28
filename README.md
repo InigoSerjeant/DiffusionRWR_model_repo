@@ -4,7 +4,8 @@ A multi-layer graph random walk model for analyzing biological data trajectories
 
 ## Overview
 
-This package implements a Random Walk with Restart (RWR) model on multi-layer graphs to analyze trajectory patterns in biological time-series data. The model integrates multiple omics layers (histone modifications and RNA expression) to identify important regulatory pathways.
+This package implements a Random Walk with Restart (RWR) model on multi-layer graphs to analyze possible gene causation trajectories that causes a change of cell state.
+
 
 ## Features
 
@@ -37,7 +38,7 @@ python -m DiffusionRWR_model_package.main
 
 Edit parameters in `main.py`:
 
-- `USE_FAST_RWR`: Toggle between fast (Numba) or slow (detailed) RWR
+- `USE_FAST_RWR`: Toggle between fast (Numba) or slow RWR
 - `edge_fn_intra`: Edge weight function for intra-layer connections
 - `edge_fn_inter`: Edge weight function for inter-layer connections
 - `start` / `end`: Basis vectors for start/target nodes
@@ -78,10 +79,8 @@ The pipeline generates an interactive 3D Plotly visualization showing:
 - Basis vectors (start/target points)
 - Sampled random walk trajectories
 
-## License
 
-MIT License
 
 ## Author
 
-Inigo
+Inigo Serjeant
