@@ -27,10 +27,9 @@ edge_fn_intra = cor_gaussian_shifted
 edge_fn_inter = intra_layer_corr_gaussian_shifted
 start='e3'
 end='e5'
-restart_prob=0.01
+restart_prob=0.3
 n_simulations=1000
 folder_path = r"C:\Users\inigo\OneDrive\Documents\Fourth_Year\Computations\Dissertation\DiffusionRWR_model_repo\DiffusionRWR_model_package\data\Modelled"
-
 
 
 
@@ -87,8 +86,8 @@ def main():
         print("Using FAST RWR (Numba JIT-compiled)")
         results, successful_walks, restarted_walks, total_attempts, successful_results = simulate_walks_FAST(
             adj_matrix=multi_graph,
-            start=f'{start}_rna_ai',  # Start from RNA layer
-            target=f'{end}_rna_ai',  # Target in RNA layer
+            start=start,  # Shared basis vector (e.g., 'e3')
+            target=end,  # Shared basis vector (e.g., 'e5')
             restart_prob=restart_prob,
             n_sims=n_simulations
         )
@@ -96,8 +95,8 @@ def main():
         print("Using SLOW RWR (more detailed output)")
         results, successful_walks, restarted_walks, total_attempts, successful_results = simulate_random_walks(
             adjacency_matrix=multi_graph,
-            start_node=f'{start}_rna_ai',  # Start from RNA layer
-            target_node=f'{end}_rna_ai',  # Target in RNA layer
+            start_node=start,  # Shared basis vector (e.g., 'e3')
+            target_node=end,  # Shared basis vector (e.g., 'e5')
             restart_prob=restart_prob,
             n_simulations=n_simulations
         )
@@ -130,12 +129,13 @@ def main():
     basis_centered = standard_basis_std - pca_model.mean_
     basis_pca = basis_centered @ pca_model.components_.T
     
+    # Shared basis vectors (not layer-specific)
     basis_coords = {
-        'e1_rna_ai': basis_pca[0],
-        'e2_rna_ai': basis_pca[1],
-        'e3_rna_ai': basis_pca[2],
-        'e4_rna_ai': basis_pca[3],
-        'e5_rna_ai': basis_pca[4]
+        'e1': basis_pca[0],
+        'e2': basis_pca[1],
+        'e3': basis_pca[2],
+        'e4': basis_pca[3],
+        'e5': basis_pca[4]
     }
     
     # Step 6: Plot results
@@ -148,6 +148,8 @@ def main():
             categories=['k9me2', 'k20me3', 'rna_ai'],
             pca_model=pca_model,
             basis_coords=basis_coords,
+            start=start,
+            end=end,
             title="Random Walk Visit Frequency on Multi-Layer Graph PCA"
         )
         
@@ -159,7 +161,7 @@ def main():
             embeddings_dict=embeddings_dict,
             pca_model=pca_model,
             basis_coords=basis_coords,
-            n_trajectories=10 # Change this number to plot more or fewer trajectories
+            n_trajectories=5 # Change this number to plot more or fewer trajectories
         )
         
         fig.show()

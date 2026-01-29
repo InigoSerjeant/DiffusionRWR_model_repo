@@ -10,6 +10,8 @@ def plot_trajectory_visit_frequencies(
     categories,
     pca_model,
     basis_coords=None,
+    start=None,
+    end=None,
     title="Random Walk Visit Frequency Visualization",
     min_marker_size=2,
     max_marker_size=30
@@ -39,6 +41,12 @@ def plot_trajectory_visit_frequencies(
         
     basis_coords : dict, optional
         Dictionary mapping basis vector names to their PCA coordinates for plotting reference points.
+    
+    start : str, optional
+        Starting node name for the random walks.
+    
+    end : str, optional
+        Ending node name for the random walks.
         
     title : str
         Title for the plot.
@@ -57,6 +65,11 @@ def plot_trajectory_visit_frequencies(
         Visit counts for all nodes.
     """
     print(f"=== Creating Visit Frequency Visualization ===\n")
+    
+    # Check if start/end are basis vectors
+    basis_vector_names = ['e1', 'e2', 'e3', 'e4', 'e5']
+    start_is_basis = start in basis_vector_names if start else True
+    end_is_basis = end in basis_vector_names if end else True
     
     # Calculate visit counts for all nodes across ALL successful walks
     all_nodes_visited = []
@@ -85,23 +98,54 @@ def plot_trajectory_visit_frequencies(
     # Create the figure
     fig = go.Figure()
     
-    # Process each category
-    for idx, (cat_name, cat_data) in enumerate(data_dict.items()):
-        cat_embedding = embeddings_dict[cat_name]
+    # First pass: collect all visit counts to get global min/max
+    all_visit_counts_list = []
+    category_visit_data = {}
+    start_end_nodes = []  # Track start/end nodes if they're not basis vectors
+    
+    for cat_name, cat_data in data_dict.items():
         gene_names = list(cat_data.index)
-        
-        # Get visit counts for genes in this category
-        # Node names in the graph have the format: gene_layer (e.g., "GENE123_rna_ai")
         visit_counts = []
         for gene in gene_names:
-            # Append layer suffix to match node names in the graph
             node_name = f"{gene}_{cat_name}"
             if node_name in node_counts.index:
                 visit_counts.append(node_counts[node_name])
             else:
                 visit_counts.append(0)
-        
         visit_counts = np.array(visit_counts)
+        category_visit_data[cat_name] = (gene_names, visit_counts)
+        
+        # Exclude start/end nodes from scaling if they're not basis vectors
+        for i, gene in enumerate(gene_names):
+            node_name = f"{gene}_{cat_name}"
+            if visit_counts[i] > 0:
+                # Check if this node is start or end
+                is_start_or_end = False
+                if not start_is_basis and start and node_name == start:
+                    is_start_or_end = True
+                    start_end_nodes.append((cat_name, i, 'start', visit_counts[i]))
+                if not end_is_basis and end and node_name == end:
+                    is_start_or_end = True
+                    start_end_nodes.append((cat_name, i, 'end', visit_counts[i]))
+                
+                if not is_start_or_end:
+                    all_visit_counts_list.append(visit_counts[i])
+    
+    # Calculate global statistics for scaling (excluding start/end if they're genes)
+    all_visit_counts_array = np.array(all_visit_counts_list)
+    global_min = 0.1  # For unvisited nodes
+    global_max = all_visit_counts_array.max() if len(all_visit_counts_array) > 0 else 1
+    
+    print(f"\nGlobal visit statistics across all categories:")
+    print(f"  Min visits: 0")
+    print(f"  Max visits (excluding start/end genes): {global_max}")
+    if start_end_nodes:
+        print(f"  Start/end genes excluded from scaling: {len(start_end_nodes)}")
+    
+    # Process each category with global scaling
+    for idx, (cat_name, cat_data) in enumerate(data_dict.items()):
+        cat_embedding = embeddings_dict[cat_name]
+        gene_names, visit_counts = category_visit_data[cat_name]
         
         print(f"\n{cat_name.upper()} statistics:")
         print(f"  Genes visited at least once: {np.sum(visit_counts > 0)}/{len(gene_names)}")
@@ -110,40 +154,67 @@ def plot_trajectory_visit_frequencies(
             print(f"  Mean visits per visited gene: {visit_counts[visit_counts > 0].mean():.1f}")
             print(f"  Median visits per visited gene: {np.median(visit_counts[visit_counts > 0]):.1f}")
         
-        # Scale visit counts to marker sizes
+        # Scale visit counts to marker sizes using GLOBAL min/max
         visit_counts_scaled = visit_counts.copy().astype(float)
-        visit_counts_scaled[visit_counts_scaled == 0] = 0.1  # Small size for unvisited
+        visit_counts_scaled[visit_counts_scaled == 0] = global_min  # Small size for unvisited
         
-        # Apply sqrt scaling for better visual distribution
-        sizes_scaled = visit_counts_scaled
+        # Apply scaling using global range
         sizes_scaled = min_marker_size + (max_marker_size - min_marker_size) * \
-                      (sizes_scaled - sizes_scaled.min()) / (sizes_scaled.max() - sizes_scaled.min() + 1e-10)
+                      (visit_counts_scaled - global_min) / (global_max - global_min + 1e-10)
         
         # Get color for this category
         cat_color = category_colors[idx % len(category_colors)]
         
-        # Add trace for this category
-        fig.add_trace(go.Scatter3d(
-            x=cat_embedding[:, 0],
-            y=cat_embedding[:, 1],
-            z=cat_embedding[:, 2],
-            mode='markers',
-            name=cat_name,
-            marker=dict(
-                size=sizes_scaled,
-                color=cat_color,
-                line=dict(color='black', width=0.3)
-            ),
-            text=[f"{gene}<br>Category: {cat_name}<br>Visits: {count}" 
-                  for gene, count in zip(gene_names, visit_counts)],
-            hovertemplate='%{text}<extra></extra>',
-            showlegend=True
-        ))
+        # Create masks for regular nodes vs start/end nodes
+        regular_mask = np.ones(len(gene_names), dtype=bool)
+        for cat, gene_idx, role, count in start_end_nodes:
+            if cat == cat_name:
+                regular_mask[gene_idx] = False
+        
+        # Add trace for regular nodes in this category
+        if np.any(regular_mask):
+            fig.add_trace(go.Scatter3d(
+                x=cat_embedding[regular_mask, 0],
+                y=cat_embedding[regular_mask, 1],
+                z=cat_embedding[regular_mask, 2],
+                mode='markers',
+                name=cat_name,
+                marker=dict(
+                    size=sizes_scaled[regular_mask],
+                    color=cat_color,
+                    line=dict(color='black', width=0.3)
+                ),
+                text=[f"{gene}<br>Category: {cat_name}<br>Visits: {count}" 
+                      for gene, count, is_regular in zip(gene_names, visit_counts, regular_mask) if is_regular],
+                hovertemplate='%{text}<extra></extra>',
+                showlegend=True
+            ))
+        
+        # Add separate traces for start/end nodes with star markers
+        for cat, gene_idx, role, count in start_end_nodes:
+            if cat == cat_name:
+                gene = gene_names[gene_idx]
+                fig.add_trace(go.Scatter3d(
+                    x=[cat_embedding[gene_idx, 0]],
+                    y=[cat_embedding[gene_idx, 1]],
+                    z=[cat_embedding[gene_idx, 2]],
+                    mode='markers',
+                    name=f"{gene} ({role})",
+                    marker=dict(
+                        size=20,  # Larger than max
+                        color=cat_color,
+                        symbol='diamond',
+                        line=dict(color='gold', width=3)
+                    ),
+                    text=f"{gene}<br>Category: {cat_name}<br>Role: {role}<br>Visits: {count}",
+                    hovertemplate='%{text}<extra></extra>',
+                    showlegend=True
+                ))
     
     # Add basis vectors if provided
     if basis_coords is not None:
         basis_colors_plot = ['orange', 'cyan', 'red', 'purple', 'green']
-        basis_names_plot = ['e1', 'e2', 'e3 (Start/Restart)', 'e4', 'e5 (Target)']
+        basis_names_plot = ['e1', 'e2', 'e3', 'e4', 'e5']
         
         for i, (basis_key, coords) in enumerate(basis_coords.items()):
             # Get visit count for this basis vector

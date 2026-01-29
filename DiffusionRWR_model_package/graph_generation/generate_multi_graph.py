@@ -22,13 +22,14 @@ def create_multigraph(std_data_dict, intra_layer_graphs, edge_fn_inter, start='e
     Create a multi-layer graph with:
     - Intra-layer connections within each dataset
     - Inter-layer connections between datasets
+    - Merged basis vectors (e.g., e1_rna_ai, e1_k9me2 merged into e1)
     
     Parameters:
     -----------
     std_data_dict : dict
         Dictionary of standardized datasets (e.g., {'rna': rna_std, 'k9me2': k9me2_std})
-    edge_fn_intra : function
-        Function to compute edge weights within layers (adjacency matrix)
+    intra_layer_graphs : dict
+        Dictionary of intra-layer adjacency matrices
     edge_fn_inter : function
         Function to compute edge weights between layers (takes two node vectors)
     start : str
@@ -113,11 +114,49 @@ def create_multigraph(std_data_dict, intra_layer_graphs, edge_fn_inter, start='e
         complete_adj.loc[row_nodes, col_nodes] = section_df.values
         print(f"    {section_name}: {section_df.shape}")
 
+    # Step 4: Merge basis vectors across layers
+    print("\n[STEP 4] Merging basis vectors across layers...")
+    basis_names = ['e1', 'e2', 'e3', 'e4', 'e5']
+    
+    for basis_name in basis_names:
+        # Find all nodes that are exactly this basis vector with layer suffix (e.g., "e1_rna_ai", "e1_k9me2")
+        nodes_to_merge = [node for node in complete_adj.index if node.startswith(basis_name + '_') and any(node.endswith(f'_{layer}') for layer in dataset_names)]
+        
+        if len(nodes_to_merge) > 1:
+            print(f"\n  Merging {basis_name}: {nodes_to_merge}")
+            
+            # Create merged node with combined edges
+            # For incoming edges: sum all edges pointing to any of the nodes_to_merge
+            incoming_edges = complete_adj.loc[:, nodes_to_merge].sum(axis=1)
+            
+            # For outgoing edges: sum all edges from any of the nodes_to_merge
+            outgoing_edges = complete_adj.loc[nodes_to_merge, :].sum(axis=0)
+            
+            # Remove old nodes
+            complete_adj = complete_adj.drop(index=nodes_to_merge, columns=nodes_to_merge)
+            
+            # Add merged node
+            # First, add as new row and column with zeros
+            complete_adj[basis_name] = 0.0
+            complete_adj.loc[basis_name] = 0.0
+            
+            # Set incoming edges (exclude the basis nodes we're merging)
+            other_nodes = [n for n in incoming_edges.index if n not in nodes_to_merge]
+            complete_adj.loc[other_nodes, basis_name] = incoming_edges.loc[other_nodes].values
+            
+            # Set outgoing edges (exclude the basis nodes we're merging)
+            other_nodes = [n for n in outgoing_edges.index if n not in nodes_to_merge]
+            complete_adj.loc[basis_name, other_nodes] = outgoing_edges.loc[other_nodes].values
+            
+            print(f"    Created merged node '{basis_name}' with {(complete_adj.loc[basis_name] != 0).sum()} outgoing and {(complete_adj[basis_name] != 0).sum()} incoming edges")
+
     # Print statistics
     print("\n" + "=" * 80)
     print("MULTI-GRAPH STATISTICS")
     print("=" * 80)
-    print(f"Total nodes: {complete_adj.shape[0]}")
+    basis_count = sum(1 for node in complete_adj.index if node in basis_names)
+    gene_count = complete_adj.shape[0] - basis_count
+    print(f"Total nodes: {complete_adj.shape[0]} ({gene_count} genes + {basis_count} merged basis vectors)")
     print(f"Total possible edges: {complete_adj.shape[0] * complete_adj.shape[1]}")
     print(f"Non-zero edges: {(complete_adj != 0).sum().sum()}")
     print(f"Edge density: {(complete_adj != 0).sum().sum() / (complete_adj.shape[0] * complete_adj.shape[1]):.4f}")
