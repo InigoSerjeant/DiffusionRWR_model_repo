@@ -78,8 +78,16 @@ def plot_trajectory_visit_frequencies(
     
     node_counts = pd.Series(all_nodes_visited).value_counts()
     
+    # Separate shadow nodes from regular nodes
+    shadow_node_counts = node_counts[node_counts.index.str.contains('_neg')]
+    regular_node_counts = node_counts[~node_counts.index.str.contains('_neg')]
+    
     print(f"Total node visits across {len(successful_trajectories)} walks: {len(all_nodes_visited)}")
     print(f"Unique nodes visited: {len(node_counts)}")
+    print(f"  Regular nodes: {len(regular_node_counts)}")
+    print(f"  Shadow nodes: {len(shadow_node_counts)}")
+    if len(shadow_node_counts) > 0:
+        print(f"  Shadow space visits: {shadow_node_counts.sum()} ({100*shadow_node_counts.sum()/len(all_nodes_visited):.1f}%)")
     
     # Define color palette for categories
     category_colors = [
@@ -107,11 +115,17 @@ def plot_trajectory_visit_frequencies(
         gene_names = list(cat_data.index)
         visit_counts = []
         for gene in gene_names:
+            # Count visits to both regular and shadow versions
             node_name = f"{gene}_{cat_name}"
-            if node_name in node_counts.index:
-                visit_counts.append(node_counts[node_name])
-            else:
-                visit_counts.append(0)
+            shadow_node_name = f"{gene}_{cat_name}_neg"
+            
+            regular_visits = node_counts[node_name] if node_name in node_counts.index else 0
+            shadow_visits = node_counts[shadow_node_name] if shadow_node_name in node_counts.index else 0
+            
+            # Combine visits from both spaces for visualization
+            total_visits = regular_visits + shadow_visits
+            visit_counts.append(total_visits)
+        
         visit_counts = np.array(visit_counts)
         category_visit_data[cat_name] = (gene_names, visit_counts)
         
@@ -320,6 +334,7 @@ def plot_shortest_trajectories(
         Updated figure with trajectories.
     """
     print(f"\n=== Adding {n_trajectories} Randomly Sampled Trajectories ===")
+
     
     # Randomly sample trajectories
     import random
@@ -329,12 +344,17 @@ def plot_shortest_trajectories(
     # Create a mapping from node names to PCA coordinates
     node_to_coords = {}
     
-    # Add gene coordinates
+    # Add gene coordinates (both regular and shadow nodes map to same coordinates)
     for cat_name, cat_embedding in embeddings_dict.items():
         gene_names = list(data_dict[cat_name].index)
         for gene, coords in zip(gene_names, cat_embedding):
+            # Regular node
             node_name = f"{gene}_{cat_name}"
             node_to_coords[node_name] = coords
+            
+            # Shadow node maps to same PCA coordinates (same gene, different layer)
+            shadow_node_name = f"{gene}_{cat_name}_neg"
+            node_to_coords[shadow_node_name] = coords
     
     # Add basis vector coordinates
     if basis_coords is not None:
@@ -357,6 +377,8 @@ def plot_shortest_trajectories(
         x_coords = []
         y_coords = []
         z_coords = []
+        node_labels = []
+        is_shadow = []
         
         for node in path:
             if node in node_to_coords:
@@ -364,11 +386,21 @@ def plot_shortest_trajectories(
                 x_coords.append(coords[0])
                 y_coords.append(coords[1])
                 z_coords.append(coords[2])
+                node_labels.append(node)
+                # Mark if this is a shadow node
+                is_shadow.append('_neg' in node)
             else:
                 print(f"  Warning: Node '{node}' not found in coordinates")
         
         # Add trajectory as a line
         color = trajectory_colors[i % len(trajectory_colors)]
+        
+        # Create hover text with shadow indication
+        hover_text = []
+        for j, (node, shadow) in enumerate(zip(node_labels, is_shadow)):
+            space_label = "SHADOW SPACE" if shadow else "Regular space"
+            hover_text.append(f"Step {j}: {node}<br>{space_label}")
+        
         fig.add_trace(go.Scatter3d(
             x=x_coords,
             y=y_coords,
@@ -377,14 +409,16 @@ def plot_shortest_trajectories(
             name=f'Trajectory {i+1} ({steps} steps)',
             line=dict(
                 color=color,
-                width=4
+                width=4,
+                dash='dash' if any(is_shadow) else 'solid'  # Dashed if enters shadow space
             ),
             marker=dict(
                 size=4,
                 color=color,
-                opacity=0.8
+                opacity=0.8,
+                symbol=['diamond' if s else 'circle' for s in is_shadow]  # Different marker for shadow
             ),
-            hovertext=[f"Step {j}: {node}" for j, node in enumerate(path[:len(x_coords)])],
+            hovertext=hover_text,
             hovertemplate='%{hovertext}<extra></extra>',
             showlegend=True
         ))
@@ -392,5 +426,129 @@ def plot_shortest_trajectories(
         print(f"  Trajectory {i+1}: {steps} steps, {traj['unique_nodes']} unique nodes")
     
     print(f"✓ Added {len(sampled_trajectories)} randomly sampled trajectories to plot")
+    
+    return fig
+
+
+def plot_ideal_trajectory(fig, pca_model, n_points_per_segment=50):
+    """
+    Add the ideal piecewise linear trajectory from e1 → e2 → e3 → e4 → e5 to the plot.
+    
+    This trajectory represents the "ground truth" path through the developmental stages,
+    moving linearly through the convex space between consecutive basis vectors.
+    
+    Parameters:
+    -----------
+    fig : plotly.graph_objects.Figure
+        Existing figure to add the ideal trajectory to
+    pca_model : PCA object
+        Fitted PCA model to transform points into PCA space
+    n_points_per_segment : int
+        Number of interpolation points between each pair of basis vectors
+        
+    Returns:
+    --------
+    fig : plotly.graph_objects.Figure
+        Updated figure with ideal trajectory
+    """
+    print("\n=== Adding Ideal Trajectory to Plot ===")
+    
+    # Define the 5 basis vectors (identity matrix)
+    n_features = 5
+    basis_vectors = np.eye(n_features)
+    
+    # Standardize each basis vector (row-wise standardization)
+    standardized_basis = np.zeros_like(basis_vectors)
+    for i in range(n_features):
+        row_mean = basis_vectors[i].mean()
+        row_std = basis_vectors[i].std()
+        if row_std == 0:
+            standardized_basis[i] = basis_vectors[i] - row_mean
+        else:
+            standardized_basis[i] = (basis_vectors[i] - row_mean) / row_std
+    
+    print(f"Standardized basis vectors:")
+    for i, vec in enumerate(standardized_basis):
+        print(f"  e{i+1}: {vec}")
+    
+    # Generate piecewise linear path: e1 → e2 → e3 → e4 → e5
+    trajectory_points_unstd = []
+    
+    for i in range(n_features - 1):
+        # Interpolate between e_i and e_{i+1} in ORIGINAL space (before standardization)
+        start_vec = basis_vectors[i]
+        end_vec = basis_vectors[i + 1]
+        
+        # Create convex combination: (1-t)*start + t*end for t in [0, 1]
+        for t in np.linspace(0, 1, n_points_per_segment, endpoint=(i == n_features - 2)):
+            interpolated = (1 - t) * start_vec + t * end_vec
+            trajectory_points_unstd.append(interpolated)
+    
+    # Convert to array
+    trajectory_points_unstd = np.array(trajectory_points_unstd)
+    print(f"\nGenerated {len(trajectory_points_unstd)} interpolated points in convex space")
+    
+    # Standardize each interpolated point (row-wise)
+    trajectory_points = np.zeros_like(trajectory_points_unstd)
+    for i in range(len(trajectory_points_unstd)):
+        row_mean = trajectory_points_unstd[i].mean()
+        row_std = trajectory_points_unstd[i].std()
+        if row_std == 0:
+            trajectory_points[i] = trajectory_points_unstd[i] - row_mean
+        else:
+            trajectory_points[i] = (trajectory_points_unstd[i] - row_mean) / row_std
+    
+    print(f"Standardized all {len(trajectory_points)} interpolated points")
+    
+    # Transform into PCA space
+    trajectory_pca = pca_model.transform(trajectory_points)
+    
+    print(f"Transformed to PCA space: shape {trajectory_pca.shape}")
+    print(f"  PC1 range: [{trajectory_pca[:, 0].min():.3f}, {trajectory_pca[:, 0].max():.3f}]")
+    print(f"  PC2 range: [{trajectory_pca[:, 1].min():.3f}, {trajectory_pca[:, 1].max():.3f}]")
+    print(f"  PC3 range: [{trajectory_pca[:, 2].min():.3f}, {trajectory_pca[:, 2].max():.3f}]")
+    
+    # Add to plot as a thick golden line
+    fig.add_trace(go.Scatter3d(
+        x=trajectory_pca[:, 0],
+        y=trajectory_pca[:, 1],
+        z=trajectory_pca[:, 2],
+        mode='lines',
+        name='Ideal Trajectory (e1→e2→e3→e4→e5)',
+        line=dict(
+            color='gold',
+            width=8,
+            dash='solid'
+        ),
+        hovertemplate='Ideal Developmental Path<br>PC1: %{x:.3f}<br>PC2: %{y:.3f}<br>PC3: %{z:.3f}<extra></extra>',
+        showlegend=True,
+        legendrank=1  # Show at top of legend
+    ))
+    
+    # Add markers at the basis vector positions
+    basis_pca = pca_model.transform(standardized_basis)
+    basis_labels = ['e1 (Start)', 'e2', 'e3', 'e4', 'e5 (End)']
+    
+    fig.add_trace(go.Scatter3d(
+        x=basis_pca[:, 0],
+        y=basis_pca[:, 1],
+        z=basis_pca[:, 2],
+        mode='markers+text',
+        name='Developmental Stages',
+        marker=dict(
+            size=12,
+            color='gold',
+            symbol='diamond',
+            line=dict(color='black', width=2)
+        ),
+        text=basis_labels,
+        textposition='top center',
+        textfont=dict(size=12, color='gold', family='Arial Black'),
+        hovertemplate='%{text}<br>PC1: %{x:.3f}<br>PC2: %{y:.3f}<br>PC3: %{z:.3f}<extra></extra>',
+        showlegend=True,
+        legendrank=2
+    ))
+    
+    print("✓ Added ideal trajectory and stage markers to plot")
     
     return fig
