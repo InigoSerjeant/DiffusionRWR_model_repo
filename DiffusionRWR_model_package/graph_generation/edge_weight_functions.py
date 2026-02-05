@@ -13,7 +13,15 @@ def intra_layer_corr_gaussian_shifted(vec_a, vec_b, sigma=1):
     correlation = np.corrcoef(vec_a, vec_b)[0, 1]
     return np.exp(-0.5 * ((1 - 0.5 * (correlation + 1)) / sigma) ** 2)
 
-def cor_gaussian_abs(combined_data, sigma=0.05):
+def cor_gaussian_abs_inter(vec_a, vec_b, sigma=0.01):
+    """
+    Inter-layer edge weight using absolute correlation with Gaussian kernel.
+    Takes two vectors (one from each layer) and computes the weight.
+    """
+    corr = np.abs(np.corrcoef(vec_a, vec_b)[0, 1])
+    return np.exp(-0.5 * ((1 - corr) / sigma) ** 2)
+
+def cor_gaussian_abs(combined_data, sigma=0.01):
     """
     Generate edge weights based on absolute correlation with Gaussian kernel.
     Also returns sign matrix for tracking positive/negative correlations.

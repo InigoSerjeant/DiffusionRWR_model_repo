@@ -29,7 +29,8 @@ fix_transition_prob = True  # Whether to fix transition probabilities between la
 edge_fn_intra = cor_gaussian_shifted
 edge_fn_inter = intra_layer_corr_gaussian_shifted
 edge_fn_negative = negative_correlation_weight  # Function for negative correlations
-gamma = 0.5  # Probability of negative correlation jumps
+gamma = 0.1  # Probability of negative correlation jumps
+alpha = 0.1
 start='e3'
 end='e5'
 restart_prob=0.02
@@ -107,7 +108,7 @@ def start_to_end():
             std_data_dict=cleaned_data_dict,
             intra_layer_graphs=intra_layer_graphs,
             edge_fn_inter=edge_fn_inter,
-            alpha=0.1,
+            alpha=alpha,
             start=start,
             end=end
         )

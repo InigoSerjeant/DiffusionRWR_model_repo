@@ -401,27 +401,64 @@ def plot_shortest_trajectories(
             space_label = "SHADOW SPACE" if shadow else "Regular space"
             hover_text.append(f"Step {j}: {node}<br>{space_label}")
         
-        fig.add_trace(go.Scatter3d(
-            x=x_coords,
-            y=y_coords,
-            z=z_coords,
-            mode='lines+markers',
-            name=f'Trajectory {i+1} ({steps} steps)',
-            line=dict(
-                color=color,
-                width=4,
-                dash='dash' if any(is_shadow) else 'solid'  # Dashed if enters shadow space
-            ),
-            marker=dict(
-                size=4,
-                color=color,
-                opacity=0.8,
-                symbol=['diamond' if s else 'circle' for s in is_shadow]  # Different marker for shadow
-            ),
-            hovertext=hover_text,
-            hovertemplate='%{hovertext}<extra></extra>',
-            showlegend=True
-        ))
+        # Identify transitions between regular and shadow space
+        # We need to create separate traces for different segment types
+        segments = []  # List of (start_idx, end_idx, is_transition)
+        
+        current_segment_start = 0
+        for j in range(len(is_shadow) - 1):
+            # Check if there's a transition between consecutive nodes
+            is_transition = is_shadow[j] != is_shadow[j + 1]
+            
+            # Check if we need to start a new segment
+            if j == 0:
+                current_is_transition = is_transition
+            elif is_transition != current_is_transition:
+                # End current segment and start new one
+                segments.append((current_segment_start, j + 1, current_is_transition))
+                current_segment_start = j
+                current_is_transition = is_transition
+        
+        # Add the final segment
+        segments.append((current_segment_start, len(is_shadow), current_is_transition if len(is_shadow) > 1 else False))
+        
+        # Plot each segment with appropriate line style
+        for seg_idx, (start_idx, end_idx, is_transition) in enumerate(segments):
+            seg_x = x_coords[start_idx:end_idx]
+            seg_y = y_coords[start_idx:end_idx]
+            seg_z = z_coords[start_idx:end_idx]
+            seg_hover = hover_text[start_idx:end_idx]
+            seg_shadow = is_shadow[start_idx:end_idx]
+            
+            # Determine line style
+            dash_style = 'dot' if is_transition else 'solid'
+            
+            # Only show legend for first segment
+            show_legend = (seg_idx == 0)
+            legend_name = f'Trajectory {i+1} ({steps} steps)' if show_legend else None
+            
+            fig.add_trace(go.Scatter3d(
+                x=seg_x,
+                y=seg_y,
+                z=seg_z,
+                mode='lines+markers',
+                name=legend_name,
+                line=dict(
+                    color=color,
+                    width=4,
+                    dash=dash_style
+                ),
+                marker=dict(
+                    size=4,
+                    color=color,
+                    opacity=0.8,
+                    symbol=['diamond' if s else 'circle' for s in seg_shadow]
+                ),
+                hovertext=seg_hover,
+                hovertemplate='%{hovertext}<extra></extra>',
+                showlegend=show_legend,
+                legendgroup=f'traj_{i}'  # Group all segments of same trajectory
+            ))
         
         print(f"  Trajectory {i+1}: {steps} steps, {traj['unique_nodes']} unique nodes")
     

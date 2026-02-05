@@ -1,23 +1,37 @@
 import pandas as pd
 import numpy as np
 
-def create_connected_sections(data_A, data_B, label_A, label_B, edge_fn, same_gene=True):
+def create_connected_sections(data_A, data_B, label_A, label_B, edge_fn, same_gene=True, return_sign_matrix=False): # Reviewed
     A_new_row_names = [i + label_A for i in data_A.index]
     B_new_col_names = [i + label_B for i in data_B.index]
     connected_section_array = np.zeros((len(A_new_row_names), len(B_new_col_names)))
+    
     if same_gene:
         for i, A in enumerate(data_A.index):
             for j, B in enumerate(data_B.index):
                 if A.split('*')[0] in B:
-                    connected_section_array[i,j] = edge_fn(data_A.loc[A], data_B.loc[B])
+                    if return_sign_matrix:
+                        # For sign matrix, use raw correlation (not transformed)
+                        raw_corr = np.corrcoef(data_A.loc[A], data_B.loc[B])[0, 1]
+                        connected_section_array[i,j] = np.sign(raw_corr)
+                    else:
+                        edge_value = edge_fn(data_A.loc[A], data_B.loc[B])
+                        connected_section_array[i,j] = edge_value
     else:
         for i, A in enumerate(data_A.index):
             for j, B in enumerate(data_B.index):
-                connected_section_array[i,j] = edge_fn(data_A.loc[A], data_B.loc[B])
+                if return_sign_matrix:
+                    # For sign matrix, use raw correlation (not transformed)
+                    raw_corr = np.corrcoef(data_A.loc[A], data_B.loc[B])[0, 1]
+                    connected_section_array[i,j] = np.sign(raw_corr)
+                else:
+                    edge_value = edge_fn(data_A.loc[A], data_B.loc[B])
+                    connected_section_array[i,j] = edge_value
+    
     connected_section = pd.DataFrame(connected_section_array, index=A_new_row_names, columns=B_new_col_names)
     return connected_section
 
-def create_multigraph(std_data_dict, intra_layer_graphs, edge_fn_inter, start='e3', end='e5'):
+def create_multigraph(std_data_dict, intra_layer_graphs, edge_fn_inter, start='e3', end='e5'): #reviewed
     """
     Create a multi-layer graph with:
     - Intra-layer connections within each dataset
@@ -47,7 +61,7 @@ def create_multigraph(std_data_dict, intra_layer_graphs, edge_fn_inter, start='e
     print("=" * 80)
     
     # Step 1: Generate intra-layer graphs for each dataset
-    print("\n[STEP 1] Generating intra-layer graphs...")
+    print("\n[STEP 1] Intra layer graphs are generated separately and provided as input (skipping generation here)")
 
     
     # Step 2: Generate inter-layer connections
@@ -167,7 +181,7 @@ def create_multigraph(std_data_dict, intra_layer_graphs, edge_fn_inter, start='e
     print(f"  Median: {np.median(complete_adj.values):.6f}")
     return complete_adj
 
-def create_multigraph_with_layer_transitions(std_data_dict, intra_layer_graphs, edge_fn_inter, alpha=0.1, start='e3', end='e5'):
+def create_multigraph_with_layer_transitions(std_data_dict, intra_layer_graphs, edge_fn_inter, alpha=0.1, start='e3', end='e5'): # Reviewed
     """
     Create a multi-layer graph with controlled inter-layer transitions and normalized edge weights for random walks.
     
@@ -232,71 +246,103 @@ def create_multigraph_with_layer_transitions(std_data_dict, intra_layer_graphs, 
     # Create a mapping of nodes to layers
     node_layers = {node: get_node_layer(node) for node in complete_adj.index}
     
-    # Scale edges based on intra-layer vs inter-layer
-    intra_layer_scale = 1 - alpha
-    inter_layer_scale = alpha / (num_layers - 1) if num_layers > 1 else 0
+    # Step 2a: Normalize edges BEFORE applying alpha scaling
+    print("\n[STEP 2a] Normalizing edge weights before scaling...")
     
-    print(f"  Intra-layer scale factor: {intra_layer_scale:.3f}")
-    print(f"  Inter-layer scale factor: {inter_layer_scale:.3f}")
+    # For each node, we need to:
+    # 1. Separate intra-layer and inter-layer edges
+    # 2. Normalize each group to sum to 1
+    # 3. Scale: intra-layer by (1-alpha), inter-layer by alpha/(num_layers-1)
     
-    # Create scaled adjacency matrix
-    scaled_adj = complete_adj.copy()
-    
-    # Count edge types for diagnostics
-    intra_count = 0
-    inter_count = 0
-    basis_out_count = 0
-    basis_in_count = 0
+    scaled_adj = pd.DataFrame(0.0, index=complete_adj.index, columns=complete_adj.columns)
     
     for source_node in complete_adj.index:
         source_layer = node_layers[source_node]
         
-        for target_node in complete_adj.columns:
-            if complete_adj.loc[source_node, target_node] == 0:
-                continue  # Skip zero edges
+        # Get all outgoing edges for this node
+        outgoing_edges = complete_adj.loc[source_node, :]
+        nonzero_targets = outgoing_edges[outgoing_edges > 0].index.tolist()
+        
+        if len(nonzero_targets) == 0:
+            continue
+        
+        # Categorize edges
+        intra_targets = []
+        inter_targets = []
+        
+        for target in nonzero_targets:
+            target_layer = node_layers[target]
             
+            # Check if intra-layer or inter-layer
+            if source_layer is None or target_layer is None:
+                # Basis vector involved - treat as intra for now
+                intra_targets.append(target)
+            elif source_layer == target_layer:
+                # Same layer
+                intra_targets.append(target)
+            else:
+                # Different layer
+                inter_targets.append(target)
+        
+        # Get raw weights
+        intra_weights = outgoing_edges[intra_targets].values if len(intra_targets) > 0 else np.array([])
+        inter_weights = outgoing_edges[inter_targets].values if len(inter_targets) > 0 else np.array([])
+        
+        # Normalize within each category
+        intra_sum = intra_weights.sum()
+        inter_sum = inter_weights.sum()
+        
+        # Scale by probability factors
+        if intra_sum > 0:
+            intra_normalized = (intra_weights / intra_sum) * (1 - alpha)
+            scaled_adj.loc[source_node, intra_targets] = intra_normalized
+        
+        if inter_sum > 0:
+            inter_normalized = (inter_weights / inter_sum) * alpha
+            scaled_adj.loc[source_node, inter_targets] = inter_normalized
+    
+    # Count edge types for diagnostics
+    intra_count = 0
+    inter_count = 0
+    
+    for source_node in scaled_adj.index:
+        source_layer = node_layers[source_node]
+        for target_node in scaled_adj.columns:
+            if scaled_adj.loc[source_node, target_node] == 0:
+                continue
             target_layer = node_layers[target_node]
             
-            # Determine if this is intra-layer, inter-layer, or involves basis vectors
-            if source_layer is None and target_layer is None:
-                # Both are basis vectors - keep original weight (basis to basis)
-                continue
-            elif source_layer is None:
-                # Basis vector to gene - scale by intra (stay in conceptual space) or distribute across layers
-                # Use intra_layer_scale to keep walks focused
-                scaled_adj.loc[source_node, target_node] = complete_adj.loc[source_node, target_node] * intra_layer_scale
-                basis_out_count += 1
-            elif target_layer is None:
-                # Gene to basis vector - scale by intra to allow reaching the target
-                scaled_adj.loc[source_node, target_node] = complete_adj.loc[source_node, target_node] * intra_layer_scale
-                basis_in_count += 1
-            elif source_layer == target_layer:
-                # Intra-layer edge (gene to gene in same layer)
-                scaled_adj.loc[source_node, target_node] = complete_adj.loc[source_node, target_node] * intra_layer_scale
+            if source_layer is None or target_layer is None or source_layer == target_layer:
                 intra_count += 1
             else:
-                # Inter-layer edge (gene to gene in different layer)
-                scaled_adj.loc[source_node, target_node] = complete_adj.loc[source_node, target_node] * inter_layer_scale
                 inter_count += 1
     
-    print("  ✓ Edge scaling complete")
+    print("  ✓ Edge scaling complete with proper normalization")
     print(f"    Intra-layer edges: {intra_count}")
     print(f"    Inter-layer edges: {inter_count}")
-    print(f"    Basis->Gene edges: {basis_out_count}")
-    print(f"    Gene->Basis edges: {basis_in_count}")
     
-    # Step 3: Check edge weight distributions (NO normalization here - will be done in RWR preprocessing)
+    # Verify that row sums equal 1 (within tolerance)
+    row_sums = scaled_adj.sum(axis=1)
+    non_zero_rows = row_sums[row_sums > 0]
+    if len(non_zero_rows) > 0:
+        print(f"\n  Row sum verification (should be ~1.0 for nodes with edges):")
+        print(f"    Min: {non_zero_rows.min():.6f}")
+        print(f"    Max: {non_zero_rows.max():.6f}")
+        print(f"    Mean: {non_zero_rows.mean():.6f}")
+        if not np.allclose(non_zero_rows, 1.0, rtol=1e-5):
+            print(f"    ⚠ WARNING: Row sums deviate from 1.0!")
+    
+    # Step 3: Check edge weight distributions
     print("\n[STEP 3] Verifying edge weight scaling...")
-    print("  Note: Final normalization will occur in RWR preprocessing to avoid double normalization")
+    print("  Edges are normalized: each node's outgoing edges sum to 1.0")
+    print("  Alpha parameter ensures correct probability distribution:")
+    print(f"    P(stay in layer) = {1-alpha:.3f}")
+    print(f"    P(switch layer) = {alpha:.3f}")
     
-    # Check row sums to see relative weights
+    # Check row sums are 1
     row_sums = scaled_adj.sum(axis=1)
     non_zero_rows = row_sums[row_sums > 0]
     print(f"  Nodes with outgoing edges: {len(non_zero_rows)}/{len(scaled_adj)}")
-    print(f"  Row sum statistics (before final normalization):")
-    print(f"    Min (non-zero): {non_zero_rows.min():.6f}")
-    print(f"    Max: {non_zero_rows.max():.6f}")
-    print(f"    Mean (non-zero): {non_zero_rows.mean():.6f}")
     
     # Print final statistics
     print("\n" + "=" * 80)
@@ -338,7 +384,7 @@ def create_shadow_network_multigraph(
     intra_graphs,
     sign_matrices,
     edge_fn_inter,
-    gamma=0.1,
+    gamma=0.01,
     start='e3',
     end='e5'
 ):
@@ -437,14 +483,28 @@ def create_shadow_network_multigraph(
         # Extract weights
         weights = adj_df.values
         
-        # VECTORIZED: Create scaled weight matrices
-        pos_weights = weights * pos_mask * (1 - gamma)
-        neg_weights = weights * neg_mask * gamma
+        # CRITICAL: Normalize BEFORE scaling by probability factors
+        # For each row, we need: sum(positive edges) = 1-gamma, sum(negative edges) = gamma
+        # Step 1: Separate positive and negative weights
+        pos_weights_raw = weights * pos_mask
+        neg_weights_raw = weights * neg_mask
+        
+        # Step 2: Normalize within each category (row-wise)
+        # Positive edges: normalize to 1, then scale to (1-gamma)
+        pos_row_sums = pos_weights_raw.sum(axis=1, keepdims=True)
+        pos_row_sums[pos_row_sums == 0] = 1  # Avoid division by zero
+        pos_weights_normalized = pos_weights_raw / pos_row_sums
+        pos_weights = pos_weights_normalized * (1 - gamma)
+        
+        # Negative edges: normalize to 1, then scale to gamma
+        neg_row_sums = neg_weights_raw.sum(axis=1, keepdims=True)
+        neg_row_sums[neg_row_sums == 0] = 1  # Avoid division by zero
+        neg_weights_normalized = neg_weights_raw / neg_row_sums
+        neg_weights = neg_weights_normalized * gamma
         
         # Map indices to labeled nodes
         regular_idx = [node_labels[node] for node in adj_df.index]
         shadow_idx = [shadow_labels.get(node, None) for node in adj_df.index]
-        shadow_idx_valid = [idx for idx in shadow_idx if idx is not None]
         
         # Type 1: Regular → Regular (positive correlations, 1-γ)
         complete_adj.loc[regular_idx, regular_idx] = pos_weights
@@ -480,69 +540,145 @@ def create_shadow_network_multigraph(
     
     print(f"  Total intra-layer edges: {total_edges}")
     
-    # Step 4: Shadow → Target edges (simplified for now)
-    print("\n[STEP 4] Adding Shadow → Target edges...")
-    target_edges = 0
-    for name in dataset_names:
-        sign_matrix = sign_matrices[name]
-        for gene in sign_matrix.index:
-            if gene in basis_names:
-                continue
-            # If gene has any negative correlations, give small edge to target
-            if (sign_matrix.loc[gene, :] < 0).any():
-                shadow_label = f"{gene}_{name}_neg"
-                complete_adj.loc[shadow_label, end] = 0.001 * gamma
-                target_edges += 1
-    print(f"  Added {target_edges} shadow-to-target edges")
-    
-    # Step 5: Inter-layer connections (vectorized)
-    print("\n[STEP 5] Adding inter-layer connections (vectorized)...")
+    # Step 4: Inter-layer connections (vectorized)
+    print("\n[STEP 4] Adding inter-layer connections (vectorized, both directions)...")
     inter_count = 0
-    total_pairs = (len(dataset_names) * (len(dataset_names) - 1)) // 2
+    total_pairs = len(dataset_names) * (len(dataset_names) - 1)  # Both directions
     pair_idx = 0
     
-    for i, name_A in enumerate(dataset_names):
-        for name_B in dataset_names[i+1:]:
-            pair_idx += 1
-            print(f"  Processing pair {pair_idx}/{total_pairs}: {name_A} <-> {name_B}...")
+    for name_A in dataset_names:
+        for name_B in dataset_names:
+            if name_A == name_B:
+                continue  # Skip same-layer connections
             
-            # Generate inter-layer connections
-            section_AB_pos = create_connected_sections(
+            pair_idx += 1
+            print(f"  Processing pair {pair_idx}/{total_pairs}: {name_A} -> {name_B}...")
+            
+            # Generate inter-layer connections from A to B (absolute values)
+            section_AB_abs = create_connected_sections(
                 std_data_dict[name_A],
                 std_data_dict[name_B],
                 label_A=f'_{name_A}',
                 label_B=f'_{name_B}',
                 edge_fn=edge_fn_inter,
-                same_gene=True
+                same_gene=True,
+                return_sign_matrix=False
             )
             
-            # Scale by (1-gamma)
-            section_AB_scaled = section_AB_pos * (1 - gamma)
+            # Generate sign matrix for inter-layer connections
+            section_AB_signs = create_connected_sections(
+                std_data_dict[name_A],
+                std_data_dict[name_B],
+                label_A=f'_{name_A}',
+                label_B=f'_{name_B}',
+                edge_fn=edge_fn_inter,
+                same_gene=True,
+                return_sign_matrix=True
+            )
             
-            # Add regular ↔ regular edges
-            row_nodes = section_AB_scaled.index.tolist()
-            col_nodes = section_AB_scaled.columns.tolist()
+            # Separate positive and negative edges
+            pos_mask = (section_AB_signs > 0).values
+            neg_mask = (section_AB_signs < 0).values
+            weights = section_AB_abs.values
+            
+            # Separate positive and negative weights
+            pos_weights_raw = weights * pos_mask
+            neg_weights_raw = weights * neg_mask
+            
+            # Normalize within each category (row-wise)
+            # Positive edges: normalize to 1, then scale to (1-gamma)
+            pos_row_sums = pos_weights_raw.sum(axis=1, keepdims=True)
+            pos_row_sums[pos_row_sums == 0] = 1  # Avoid division by zero
+            pos_weights_normalized = pos_weights_raw / pos_row_sums
+            pos_weights_scaled = pos_weights_normalized * (1 - gamma)
+            
+            # Negative edges: normalize to 1, then scale to gamma
+            neg_row_sums = neg_weights_raw.sum(axis=1, keepdims=True)
+            neg_row_sums[neg_row_sums == 0] = 1  # Avoid division by zero
+            neg_weights_normalized = neg_weights_raw / neg_row_sums
+            neg_weights_scaled = neg_weights_normalized * gamma
+            
+            # Convert back to DataFrames
+            section_AB_pos = pd.DataFrame(pos_weights_scaled, 
+                                          index=section_AB_abs.index, 
+                                          columns=section_AB_abs.columns)
+            section_AB_neg = pd.DataFrame(neg_weights_scaled,
+                                          index=section_AB_abs.index,
+                                          columns=section_AB_abs.columns)
+            
+            # Add regular edges A → B (positive correlations ONLY)
+            row_nodes = section_AB_pos.index.tolist()
+            col_nodes = section_AB_pos.columns.tolist()
             
             if len(row_nodes) > 0 and len(col_nodes) > 0:
-                complete_adj.loc[row_nodes, col_nodes] = section_AB_scaled.to_numpy()
-                complete_adj.loc[col_nodes, row_nodes] = section_AB_scaled.T.to_numpy()
-                reg_edges = (section_AB_scaled > 0).sum().sum() * 2
+                # Only add edges where positive correlation exists (not zero)
+                complete_adj.loc[row_nodes, col_nodes] += section_AB_pos.to_numpy()
+                reg_edges = (section_AB_pos > 0).sum().sum()
                 inter_count += reg_edges
                 
-                # Add shadow ↔ shadow edges (filter basis)
+                # Add shadow edges A_neg → B_neg (positive correlations in shadow space, filter basis)
                 regular_rows = [r for r in row_nodes if not any(r.startswith(b) for b in basis_names)]
                 regular_cols = [c for c in col_nodes if not any(c.startswith(b) for b in basis_names)]
                 
                 if len(regular_rows) > 0 and len(regular_cols) > 0:
                     shadow_rows = [r + "_neg" for r in regular_rows]
                     shadow_cols = [c + "_neg" for c in regular_cols]
-                    shadow_weights = section_AB_scaled.loc[regular_rows, regular_cols]
+                    shadow_weights = section_AB_pos.loc[regular_rows, regular_cols]
                     
                     complete_adj.loc[shadow_rows, shadow_cols] = shadow_weights.to_numpy()
-                    complete_adj.loc[shadow_cols, shadow_rows] = shadow_weights.T.to_numpy()
-                    inter_count += (shadow_weights > 0).sum().sum() * 2
+                    inter_count += (shadow_weights > 0).sum().sum()
+                
+                # Add negative correlation edges: Regular → Shadow (A → B_neg)
+                if len(regular_rows) > 0 and len(regular_cols) > 0:
+                    shadow_cols = [c + "_neg" for c in regular_cols]
+                    neg_entry_weights = section_AB_neg.loc[regular_rows, regular_cols]
+                    
+                    complete_adj.loc[regular_rows, shadow_cols] = neg_entry_weights.to_numpy()
+                    inter_count += (neg_entry_weights > 0).sum().sum()
+                
+                # Add negative correlation edges: Shadow → Regular (A_neg → B)
+                if len(regular_rows) > 0 and len(regular_cols) > 0:
+                    shadow_rows = [r + "_neg" for r in regular_rows]
+                    neg_exit_weights = section_AB_neg.loc[regular_rows, regular_cols]
+                    
+                    complete_adj.loc[shadow_rows, regular_cols] = neg_exit_weights.to_numpy()
+                    inter_count += (neg_exit_weights > 0).sum().sum()
     
     print(f"  Total inter-layer edges: {inter_count}")
+    
+    # Step 5: Verify gamma parameter is correctly applied
+    print("\n[STEP 5] Verifying gamma parameter...")
+    print("  Checking row sums for regular nodes (should sum to ~1.0)...")
+    
+    # Sample some regular nodes and check their probabilities
+    sample_regular_nodes = [n for n in regular_nodes if n not in basis_names][:10]
+    gamma_violations = 0
+    
+    for node in sample_regular_nodes:
+        row = complete_adj.loc[node, :]
+        
+        # Get positive correlation edges (to regular space)
+        regular_targets = [c for c in complete_adj.columns if not c.endswith('_neg') and row[c] > 0]
+        regular_prob = row[regular_targets].sum()
+        
+        # Get negative correlation edges (to shadow space)
+        shadow_targets = [c for c in complete_adj.columns if c.endswith('_neg') and row[c] > 0]
+        shadow_prob = row[shadow_targets].sum()
+        
+        total_prob = regular_prob + shadow_prob
+        
+        if total_prob > 0:
+            actual_gamma = shadow_prob / total_prob if total_prob > 0 else 0
+            if abs(actual_gamma - gamma) > 0.01 and shadow_prob > 0:
+                gamma_violations += 1
+                if gamma_violations <= 3:  # Only print first few
+                    print(f"    {node}: P(regular)={regular_prob:.4f}, P(shadow)={shadow_prob:.4f}, "
+                          f"gamma={actual_gamma:.4f} (expected {gamma:.4f})")
+    
+    if gamma_violations == 0:
+        print(f"  ✓ Gamma parameter correctly applied: P(negative jump) = {gamma:.3f}")
+    else:
+        print(f"  ⚠ Found {gamma_violations} nodes with gamma deviations")
     
     # Step 6: Final statistics
     print("\n" + "=" * 80)
@@ -551,5 +687,8 @@ def create_shadow_network_multigraph(
     print(f"Total nodes: {len(all_nodes)}")
     print(f"Non-zero edges: {(complete_adj != 0).sum().sum()}")
     print(f"Edge density: {(complete_adj != 0).sum().sum() / (len(all_nodes) ** 2):.6f}")
+    print(f"\nProbability parameters:")
+    print(f"  Gamma (P(negative jump)): {gamma}")
+    print(f"  1-Gamma (P(positive correlation)): {1-gamma}")
     
     return complete_adj
