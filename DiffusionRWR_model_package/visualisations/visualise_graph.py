@@ -1,10 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
-from .preprocess_data import load_data
-from .generate_graph_internal import generate_single_layer_graphs
-from .generate_multi_graph import create_multigraph
-from .edge_weight_functions import corr_power, cor_gaussian_shifted
+from ..graph_generation.preprocess_data import load_data
+from ..graph_generation.generate_graph_internal import generate_single_layer_graphs, lasso_single_graph
+from ..graph_generation.generate_multi_graph import create_multigraph
+from ..graph_generation.edge_weight_functions import corr_power, cor_gaussian_shifted
 
 
 def visualize_single_layer_graph(folder_cat='rna', folder_name="Modelled", edge_fn=corr_power, 
@@ -169,10 +169,138 @@ def save_graph_visualization(folder_name="Modelled", edge_fn=corr_power,
     return data_dict, adjacency_dict
 
 
+def visualize_lasso_single_layer_graph(folder_cat='rna', folder_name="Modelled",
+                                       start='e3', end='e5', threshold=0.01,
+                                       top_n_genes=50, figsize=(16, 12),
+                                       layout_seed=42):
+    """
+    Generate a Lasso-based single-layer graph and visualize it with NetworkX.
+
+    Parameters
+    ----------
+    folder_cat : str
+        Substring used to select dataset key for plotting (e.g., 'rna').
+    folder_name : str
+        Input folder name used by load_data (e.g., "Modelled", "Unmodelled").
+    start, end : str
+        Basis vectors to preserve in graph construction.
+    threshold : float
+        Minimum edge weight to keep for visualization.
+    top_n_genes : int or None
+        Number of highest-degree nodes to include. Set to None or -1 to show all genes.
+    figsize : tuple
+        Figure size.
+    layout_seed : int
+        Seed for deterministic NetworkX layout.
+
+    Returns
+    -------
+    tuple
+        (data_dict, adjacency_dict, graph, fig, ax)
+    """
+    import os
+    from pathlib import Path
+    
+    print("=" * 60)
+    print("STEP 1: Loading and preprocessing data")
+    print("=" * 60)
+    
+    # Construct path to data folder relative to package location
+    package_dir = Path(__file__).parent.parent.parent  # Go up to Dissertation directory
+    data_folder_path = os.path.join(package_dir, '..', 'data', folder_name)
+    data_folder_path = os.path.abspath(data_folder_path)
+    
+    print(f"Looking for data in: {data_folder_path}")
+    data_dict = load_data(data_folder_path)
+
+    print("\n" + "=" * 60)
+    print("STEP 2: Generating Lasso single-layer graph")
+    print("=" * 60)
+    adjacency_dict = lasso_single_graph(
+        data_dict,
+        edge_fn=None,
+        start=start,
+        end=end,
+        return_signs=False
+    )
+
+    dataset_candidates = [dataset_key for dataset_key in adjacency_dict.keys() if folder_cat in dataset_key]
+    dataset_name = dataset_candidates[0] if len(dataset_candidates) > 0 else list(adjacency_dict.keys())[0]
+    adjacency_df = adjacency_dict[dataset_name].copy()
+
+    adjacency_df[adjacency_df < threshold] = 0
+
+    out_degree = (adjacency_df > 0).sum(axis=1)
+    in_degree = (adjacency_df > 0).sum(axis=0)
+    total_degree = out_degree + in_degree
+    
+    # Show all genes if top_n_genes is None, -1, or larger than total nodes
+    if top_n_genes is None or top_n_genes < 0 or top_n_genes >= len(adjacency_df):
+        selected_nodes = adjacency_df.index.tolist()
+    else:
+        selected_nodes = total_degree.nlargest(top_n_genes).index.tolist()
+        for node in [start, end]:
+            if node in adjacency_df.index and node not in selected_nodes:
+                selected_nodes.append(node)
+
+    adjacency_sub = adjacency_df.loc[selected_nodes, selected_nodes]
+    graph = nx.from_pandas_adjacency(adjacency_sub, create_using=nx.DiGraph)
+
+    print("\n" + "=" * 60)
+    print("STEP 3: Visualizing with NetworkX")
+    print("=" * 60)
+    print(f"Visualizing dataset: {dataset_name}")
+    print(f"Nodes shown: {graph.number_of_nodes()}")
+    print(f"Edges shown (threshold >= {threshold}): {graph.number_of_edges()}")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    pos = nx.spring_layout(graph, seed=layout_seed)
+
+    node_colors = []
+    for node in graph.nodes():
+        if node == start:
+            node_colors.append('lightgreen')
+        elif node == end:
+            node_colors.append('lightcoral')
+        else:
+            node_colors.append('skyblue')
+
+    edge_weights = np.array([graph[source][target]['weight'] for source, target in graph.edges()])
+    if edge_weights.size > 0:
+        edge_widths = 0.5 + 3.0 * (edge_weights / edge_weights.max())
+    else:
+        edge_widths = []
+
+    nx.draw_networkx_nodes(graph, pos, node_color=node_colors, node_size=350, edgecolors='black', linewidths=0.5, ax=ax)
+    nx.draw_networkx_edges(
+        graph,
+        pos,
+        width=edge_widths,
+        alpha=0.6,
+        arrows=True,
+        arrowstyle='-|>',
+        arrowsize=10,
+        edge_color='gray',
+        ax=ax
+    )
+    nx.draw_networkx_labels(graph, pos, font_size=7, ax=ax)
+
+    ax.set_title(
+        f"Lasso Single-Layer Graph ({dataset_name})\n"
+        f"threshold={threshold}, top_n_genes={top_n_genes}, start={start}, end={end}",
+        fontsize=12,
+        fontweight='bold'
+    )
+    ax.axis('off')
+    plt.tight_layout()
+
+    return data_dict, adjacency_dict, graph, fig, ax
+
+
 def visualize_multi_layer_graph(folder_name="Modelled", edge_fn_intra=corr_power, 
                                 edge_fn_inter=lambda x, y: np.corrcoef(x, y)[0, 1],
                                 start='e3', end='e5', threshold=0.1, 
-                                top_n_genes_per_layer=30, figsize=(20, 18)):
+                                top_n_genes_per_layer=200, figsize=(20, 18)):
     """
     Load data, create a multi-layer graph, and visualize it as adjacency matrix.
     

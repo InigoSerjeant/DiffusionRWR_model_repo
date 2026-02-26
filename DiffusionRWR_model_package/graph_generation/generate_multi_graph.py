@@ -385,6 +385,7 @@ def create_shadow_network_multigraph(
     sign_matrices,
     edge_fn_inter,
     gamma=0.01,
+    alpha=0.1,
     start='e3',
     end='e5'
 ):
@@ -409,6 +410,8 @@ def create_shadow_network_multigraph(
         Function for inter-layer edge weights
     gamma : float
         Probability of negative correlation jumps (0 <= gamma <= 1)
+    alpha : float
+        Probability of transitioning to a different layer at each step (0 <= alpha <= 1)
     start, end : str
         Start and end basis vectors
     
@@ -419,12 +422,16 @@ def create_shadow_network_multigraph(
     
     if not 0 <= gamma <= 1:
         raise ValueError(f"gamma must be between 0 and 1, got {gamma}")
+    if not 0 <= alpha <= 1:
+        raise ValueError(f"alpha must be between 0 and 1, got {alpha}")
     
     print("=" * 80)
     print("CREATING SHADOW NETWORK (OPTIMIZED WITH SIGN MATRICES)")
     print("=" * 80)
     print(f"Gamma (negative jump probability): {gamma}")
     print(f"Regular space probability: {1 - gamma}")
+    print(f"Alpha (inter-layer transition probability): {alpha}")
+    print(f"Intra-layer probability: {1 - alpha}")
     
     dataset_names = list(std_data_dict.keys())
     basis_names = ['e1', 'e2', 'e3', 'e4', 'e5']
@@ -586,17 +593,19 @@ def create_shadow_network_multigraph(
             neg_weights_raw = weights * neg_mask
             
             # Normalize within each category (row-wise)
-            # Positive edges: normalize to 1, then scale to (1-gamma)
+            # Inter-layer edges should vanish when alpha=0.
+            # Therefore both positive and negative inter-layer components are scaled by alpha.
+            # Positive edges: normalize to 1, then scale to alpha
             pos_row_sums = pos_weights_raw.sum(axis=1, keepdims=True)
             pos_row_sums[pos_row_sums == 0] = 1  # Avoid division by zero
             pos_weights_normalized = pos_weights_raw / pos_row_sums
-            pos_weights_scaled = pos_weights_normalized * (1 - gamma)
+            pos_weights_scaled = pos_weights_normalized * alpha
             
-            # Negative edges: normalize to 1, then scale to gamma
+            # Negative edges: normalize to 1, then scale to alpha
             neg_row_sums = neg_weights_raw.sum(axis=1, keepdims=True)
             neg_row_sums[neg_row_sums == 0] = 1  # Avoid division by zero
             neg_weights_normalized = neg_weights_raw / neg_row_sums
-            neg_weights_scaled = neg_weights_normalized * gamma
+            neg_weights_scaled = neg_weights_normalized * alpha
             
             # Convert back to DataFrames
             section_AB_pos = pd.DataFrame(pos_weights_scaled, 

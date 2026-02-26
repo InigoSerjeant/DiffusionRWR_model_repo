@@ -9,16 +9,18 @@ Main script to run the complete DiffusionRWR pipeline:
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
+from pathlib import Path
+import inspect
 
 # Import subpackages
 from DiffusionRWR_model_package.graph_generation.preprocess_data import load_data
 from DiffusionRWR_model_package.graph_generation.generate_graph_internal import generate_single_layer_graphs, generate_negative_correlation_graphs
 from DiffusionRWR_model_package.graph_generation.generate_multi_graph import create_multigraph, create_multigraph_with_layer_transitions, create_shadow_network_multigraph
-from DiffusionRWR_model_package.graph_generation.edge_weight_functions import corr_power, negative_correlation_weight
+from DiffusionRWR_model_package.graph_generation.edge_weight_functions import corr_power, negative_correlation_weight, negative_correlation_weight_exponential
 from DiffusionRWR_model_package.run_RWR.slow_RWR import simulate_random_walks
 from DiffusionRWR_model_package.run_RWR.numba_RWR import simulate_walks_FAST
 from DiffusionRWR_model_package.model_analysis.PCA_frequency_plot import plot_trajectory_visit_frequencies, plot_shortest_trajectories, plot_ideal_trajectory
-from DiffusionRWR_model_package.graph_generation.edge_weight_functions import inter_layer_corr_power, intra_layer_corr_gaussian_shifted, cor_gaussian_abs, corr_power, cor_gaussian_shifted
+from DiffusionRWR_model_package.graph_generation.edge_weight_functions import inter_layer_corr_power, intra_layer_corr_gaussian_shifted, cor_gaussian_abs, corr_power, cor_gaussian_shifted, cor_exponential_abs, cor_exponential_abs_inter, cor_exponential_shifted, intra_layer_corr_exponential_shifted
 import matplotlib.pyplot as plt
 
 
@@ -26,16 +28,31 @@ import matplotlib.pyplot as plt
 USE_FAST_RWR = True  # Set to False to use slow RWR (more detailed output)
 USE_SHADOW_NETWORK = True  # Set to True to use shadow network with negative correlations
 fix_transition_prob = True  # Whether to fix transition probabilities between layers (ignored if USE_SHADOW_NETWORK=True)
-edge_fn_intra = cor_gaussian_shifted
-edge_fn_inter = intra_layer_corr_gaussian_shifted
-edge_fn_negative = negative_correlation_weight  # Function for negative correlations
+edge_fn_intra = cor_exponential_shifted
+edge_fn_inter = intra_layer_corr_exponential_shifted
+edge_fn_negative = negative_correlation_weight_exponential  # Function for negative correlations
 gamma = 0.1  # Probability of negative correlation jumps
-alpha = 0.1
+alpha = 0.00001
 start='e3'
 end='e5'
-restart_prob=0.02
+restart_prob=0.0
 n_simulations=1000
+n_power=20
+sigma=0.05
 folder_path = r"C:\Users\inigo\OneDrive\Documents\Fourth_Year\Computations\Dissertation\DiffusionRWR_model_repo\DiffusionRWR_model_package\data\Modelled"
+
+
+def _call_edge_fn_with_params(edge_fn, *args, sigma_value=None, n_power_value=None):
+    kwargs = {}
+    try:
+        params = inspect.signature(edge_fn).parameters
+        if sigma_value is not None and "sigma" in params:
+            kwargs["sigma"] = sigma_value
+        if n_power_value is not None and "n_power" in params:
+            kwargs["n_power"] = n_power_value
+    except (TypeError, ValueError):
+        pass
+    return edge_fn(*args, **kwargs)
 
 
 
@@ -65,14 +82,42 @@ def start_to_end():
         cleaned_data_dict[clean_name] = df
     
     print(f"\nCleaned dataset names: {list(cleaned_data_dict.keys())}")
+
+    def edge_fn_intra_param(data_with_basis):
+        result = _call_edge_fn_with_params(
+            edge_fn_intra,
+            data_with_basis,
+            sigma_value=sigma,
+            n_power_value=n_power,
+        )
+        if isinstance(result, tuple):
+            return result[0]
+        return result
+
+    def edge_fn_intra_with_signs(data_with_basis):
+        corr_matrix = data_with_basis.T.corr()
+        sign_matrix = corr_matrix.apply(np.sign)
+        adjacency = edge_fn_intra_param(data_with_basis)
+        if isinstance(adjacency, np.ndarray):
+            adjacency = pd.DataFrame(adjacency, index=data_with_basis.index, columns=data_with_basis.index)
+        return adjacency, sign_matrix
+
+    def edge_fn_inter_param(vec_a, vec_b):
+        return _call_edge_fn_with_params(
+            edge_fn_inter,
+            vec_a,
+            vec_b,
+            sigma_value=sigma,
+            n_power_value=n_power,
+        )
     
     # Step 2: Generate intra-layer graphs with sign matrices
     print("\n[STEP 2] Generating intra-layer graphs...")
     if USE_SHADOW_NETWORK:
-        # Use absolute correlation with sign matrices
+        # Use selected intra-layer edge function with explicit sign matrix
         intra_layer_graphs, sign_matrices = generate_single_layer_graphs(
             cleaned_data_dict, 
-            edge_fn=cor_gaussian_abs,  # Uses |correlation|
+            edge_fn=edge_fn_intra_with_signs,
             start=start,
             end=end,
             return_signs=True
@@ -82,7 +127,7 @@ def start_to_end():
         # Use regular edge function without sign matrices
         intra_layer_graphs = generate_single_layer_graphs(
             cleaned_data_dict, 
-            edge_fn=edge_fn_intra,
+            edge_fn=edge_fn_intra_param,
             start=start,
             end=end
         )
@@ -97,8 +142,9 @@ def start_to_end():
             std_data_dict=cleaned_data_dict,
             intra_graphs=intra_layer_graphs,
             sign_matrices=sign_matrices,
-            edge_fn_inter=edge_fn_inter,
+            edge_fn_inter=edge_fn_inter_param,
             gamma=gamma,
+            alpha=alpha,
             start=start,
             end=end
         )
@@ -107,7 +153,7 @@ def start_to_end():
         multi_graph = create_multigraph_with_layer_transitions(
             std_data_dict=cleaned_data_dict,
             intra_layer_graphs=intra_layer_graphs,
-            edge_fn_inter=edge_fn_inter,
+            edge_fn_inter=edge_fn_inter_param,
             alpha=alpha,
             start=start,
             end=end
@@ -118,7 +164,7 @@ def start_to_end():
         multi_graph = create_multigraph(
             std_data_dict=cleaned_data_dict,
             intra_layer_graphs=intra_layer_graphs,
-            edge_fn_inter=edge_fn_inter,
+            edge_fn_inter=edge_fn_inter_param,
             start=start,
             end=end
         )
@@ -259,7 +305,7 @@ def start_to_end():
         )
         
         # Save to HTML file instead of showing in browser
-        output_file = "trajectory_visualization.html"
+        output_file = str(Path(__file__).resolve().parent.parent.parent / "trajectory_visualization.html")
         fig.write_html(output_file)
         print(f"\n✓ Visualization saved to: {output_file}")
         print("  Open this file in your browser to view the plot.")
