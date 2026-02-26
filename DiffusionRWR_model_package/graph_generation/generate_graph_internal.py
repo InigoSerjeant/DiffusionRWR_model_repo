@@ -150,7 +150,7 @@ def generate_negative_correlation_graphs(std_data_dict, neg_edge_fn, start='e3',
     
     return negative_adj_dict
 
-def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_signs=False):
+def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_signs=False, lasso_alpha=0.01):
     """
     Generate single-layer graph adjacency matrix using Lasso regressions.
 
@@ -172,7 +172,7 @@ def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_
             standard_basis_std_mg[i] = (standard_basis_mg[i] - row_mean) / row_std
 
     # Lasso regularization (lower = more edges, higher = sparser)
-    lasso_alpha = 0.01  # Reduced from 0.4 to get edges; adjust 0.001-0.1 for sparsity control
+    lasso_alpha = float(lasso_alpha)
     max_iter = 10000
     tol = 1e-3  # Relaxed from 1e-6 (underdetermined system with 5 samples)
     print(f"Lasso regularization alpha: {lasso_alpha}")

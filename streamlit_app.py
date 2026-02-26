@@ -8,11 +8,20 @@ import networkx as nx
 import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
+from DiffusionRWR_model_package.diffusion_functions.clustering_analysis import (
+    cluster_multiple_graphs,
+    calculate_pairwise_mutual_information,
+)
 
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "DiffusionRWR_model_package" / "data" / "Modelled"
 OUTPUT_DIR = ROOT / "DiffusionRWR_model_package" / "outputs"
+LASSO_COMBINED_SOURCE_MAP = {
+    "RNA": ("overlap_filtered_rna_ai_m_v2.csv", "RNA"),
+    "K20me3": ("overlap_filtered_k20me3_m_v2.csv", "K20me3"),
+    "K9me2": ("overlap_filtered_k9me2_m_v2.csv", "K9me2"),
+}
 
 
 def _json_safe(value):
@@ -148,29 +157,62 @@ def _load_modelled_csv(path: Path) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_combined_standardized() -> pd.DataFrame:
-    rna_path = DATA_DIR / "overlap_filtered_rna_ai_m_v2.csv"
-    k20_path = DATA_DIR / "overlap_filtered_k20me3_m_v2.csv"
-    k9_path = DATA_DIR / "overlap_filtered_k9me2_m_v2.csv"
+    return load_combined_standardized_selected(tuple(LASSO_COMBINED_SOURCE_MAP.keys()))
 
-    if not (rna_path.exists() and k20_path.exists() and k9_path.exists()):
+
+@st.cache_data(show_spinner=False)
+def load_combined_standardized_selected(selected_sources: tuple[str, ...]) -> pd.DataFrame:
+    if not selected_sources:
         return pd.DataFrame()
 
-    rna = _load_modelled_csv(rna_path)
-    k20 = _load_modelled_csv(k20_path)
-    k9 = _load_modelled_csv(k9_path)
+    frames = []
+    for source_name in selected_sources:
+        if source_name not in LASSO_COMBINED_SOURCE_MAP:
+            continue
+        filename, suffix = LASSO_COMBINED_SOURCE_MAP[source_name]
+        source_path = DATA_DIR / filename
+        if not source_path.exists():
+            continue
+        source_df = _load_modelled_csv(source_path)
+        source_df.index = [f"{gene}_{suffix}" for gene in source_df.index]
+        frames.append(source_df)
 
-    rna.index = [f"{gene}_RNA" for gene in rna.index]
-    k20.index = [f"{gene}_K20me3" for gene in k20.index]
-    k9.index = [f"{gene}_K9me2" for gene in k9.index]
+    if not frames:
+        return pd.DataFrame()
 
-    combined = pd.concat([rna, k20, k9], axis=0)
+    combined = pd.concat(frames, axis=0)
     combined = combined.sort_index()
     combined_std = combined.sub(combined.mean(axis=1), axis=0).div(combined.std(axis=1), axis=0)
     return combined_std
 
 
+def build_lasso_adjacency_from_standardized(df_standardized: pd.DataFrame, key: str, lasso_alpha: float = 0.01) -> pd.DataFrame:
+    from DiffusionRWR_model_package.graph_generation.generate_graph_internal import lasso_single_graph
+
+    if df_standardized.empty:
+        return pd.DataFrame()
+
+    gene_names = [name for name in df_standardized.index if not (name.startswith('e') and len(name) == 2)]
+    if len(gene_names) >= 2:
+        start_gene = gene_names[0]
+        end_gene = gene_names[-1]
+    else:
+        start_gene = df_standardized.index[0]
+        end_gene = df_standardized.index[-1]
+
+    adjacency_dict = lasso_single_graph(
+        {key: df_standardized},
+        edge_fn=None,
+        start=start_gene,
+        end=end_gene,
+        return_signs=False,
+        lasso_alpha=lasso_alpha,
+    )
+    return adjacency_dict[key].abs()
+
+
 @st.cache_data(show_spinner=True)
-def load_combined_lasso_adjacency() -> pd.DataFrame:
+def load_combined_lasso_adjacency(lasso_alpha: float = 0.01) -> pd.DataFrame:
     from DiffusionRWR_model_package.graph_generation.generate_graph_internal import lasso_single_graph
 
     combined_std = load_combined_standardized()
@@ -194,8 +236,52 @@ def load_combined_lasso_adjacency() -> pd.DataFrame:
         start=start_gene,
         end=end_gene,
         return_signs=False,
+        lasso_alpha=lasso_alpha,
     )
     return adjacency_dict["combined_rna_histones"]
+
+
+def build_multigraph_adjacency_for_clustering(
+    std_data_dict: dict[str, pd.DataFrame],
+    intra_layer_graphs: dict[str, pd.DataFrame],
+    alpha: float,
+    inter_method: str,
+    inter_n_power: int,
+    inter_sigma: float,
+    inter_layer_threshold: float,
+) -> pd.DataFrame:
+    from DiffusionRWR_model_package.graph_generation import edge_weight_functions
+    from DiffusionRWR_model_package.graph_generation.generate_multi_graph import create_multigraph_with_layer_transitions
+
+    if not std_data_dict or not intra_layer_graphs:
+        return pd.DataFrame()
+
+    edge_fn_base = getattr(edge_weight_functions, inter_method, None)
+    if edge_fn_base is None:
+        raise ValueError(f"Inter-layer edge function not found: {inter_method}")
+
+    def edge_fn_inter(vec_a, vec_b):
+        if inter_method == "inter_layer_corr_power":
+            weight = edge_fn_base(vec_a, vec_b, n_power=inter_n_power)
+        elif inter_method in {
+            "cor_exponential_abs_inter",
+            "cor_gaussian_abs_inter",
+            "intra_layer_corr_exponential_shifted",
+            "intra_layer_corr_gaussian_shifted",
+        }:
+            weight = edge_fn_base(vec_a, vec_b, sigma=inter_sigma)
+        else:
+            weight = edge_fn_base(vec_a, vec_b)
+        return weight if weight >= inter_layer_threshold else 0.0
+
+    return create_multigraph_with_layer_transitions(
+        std_data_dict=std_data_dict,
+        intra_layer_graphs=intra_layer_graphs,
+        edge_fn_inter=edge_fn_inter,
+        alpha=alpha,
+        start="e1",
+        end="e5",
+    )
 
 
 def _node_group(node_name: str) -> str:
@@ -563,13 +649,29 @@ def show_graph_builder_page():
     n_power = st.slider("Power n (corr_power only)", 2, 40, 20)
     sigma = st.slider("Sigma", 0.001, 1.0, 0.05, 0.001)
 
-    adjacency = build_adjacency(df, method=method, n_power=n_power, sigma=sigma)
-
     st.subheader("Thresholding + node cap")
     threshold = st.slider("Edge threshold", 0.0, 1.0, 0.15, 0.01)
     max_nodes = st.slider("Max nodes to render", 50, 1200, 300, 50)
 
-    graph = graph_from_adjacency(adjacency, threshold=threshold, max_nodes=max_nodes)
+    generate_graph = st.button("Generate graph", key="graph_builder_generate_button")
+    graph_signature = (str(selected), method, int(n_power), float(sigma), float(threshold), int(max_nodes))
+
+    if generate_graph:
+        adjacency = build_adjacency(df, method=method, n_power=n_power, sigma=sigma)
+        graph = graph_from_adjacency(adjacency, threshold=threshold, max_nodes=max_nodes)
+        st.session_state["graph_builder_graph_signature"] = graph_signature
+        st.session_state["graph_builder_graph_data"] = nx.node_link_data(graph)
+        st.success("Graph generated.")
+
+    if st.session_state.get("graph_builder_graph_signature") != graph_signature:
+        st.info("Adjust parameters and click 'Generate graph' to update the graph.")
+        return
+
+    if "graph_builder_graph_data" not in st.session_state:
+        st.info("Click 'Generate graph' to build the graph.")
+        return
+
+    graph = nx.node_link_graph(st.session_state["graph_builder_graph_data"], directed=True)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Rendered nodes", graph.number_of_nodes())
@@ -624,6 +726,243 @@ def show_graph_builder_page():
             )
 
 
+def show_multigraph_builder_page():
+    st.title("Interactive multigraph builder")
+    csv_files = discover_csv_files()
+    if not csv_files:
+        st.error(f"No CSV files found in: {DATA_DIR}")
+        return
+
+    st.subheader("Multigraph configuration")
+    c1, c2 = st.columns(2)
+    with c1:
+        graph_topology = st.selectbox(
+            "Topology",
+            ["Multi-layer", "Shadow multigraph"],
+            key="multigraph_builder_topology",
+        )
+    with c2:
+        selected_datasets = st.multiselect(
+            "Datasets",
+            options=[p.name for p in csv_files],
+            default=[p.name for p in csv_files],
+            key="multigraph_builder_datasets",
+            help="Pick at least two datasets to form layers.",
+        )
+
+    if len(selected_datasets) < 2:
+        st.warning("Select at least two datasets to build a multigraph.")
+        return
+
+    st.subheader("Intra-layer edge weighting")
+    i1, i2, i3 = st.columns(3)
+    with i1:
+        method = st.selectbox(
+            "Method",
+            ["corr_power", "cor_gaussian_abs", "cor_exponential_abs"],
+            key="multigraph_builder_intra_method",
+        )
+    with i2:
+        n_power = st.slider("Power n (corr_power)", 2, 40, 20, key="multigraph_builder_intra_n_power")
+    with i3:
+        sigma = st.slider("Sigma (gaussian/exponential)", 0.001, 1.0, 0.05, 0.001, key="multigraph_builder_intra_sigma")
+
+    st.subheader("Inter-layer weighting + transitions")
+    t1, t2, t3, t4, t5 = st.columns(5)
+    with t1:
+        inter_method = st.selectbox(
+            "Inter-layer method",
+            [
+                "inter_layer_corr_power",
+                "cor_exponential_abs_inter",
+                "cor_gaussian_abs_inter",
+                "intra_layer_corr_exponential_shifted",
+                "intra_layer_corr_gaussian_shifted",
+            ],
+            key="multigraph_builder_inter_method",
+        )
+    with t2:
+        inter_n_power = st.slider("Inter n_power", 2, 40, 20, key="multigraph_builder_inter_n_power")
+    with t3:
+        inter_sigma = st.slider("Inter sigma", 0.001, 1.0, 0.05, 0.001, key="multigraph_builder_inter_sigma")
+    with t4:
+        alpha = st.slider("Alpha (inter-layer transition)", 0.0, 1.0, 0.1, 0.01, key="multigraph_builder_alpha")
+    with t5:
+        inter_layer_threshold = st.slider(
+            "Inter-layer threshold",
+            0.0,
+            1.0,
+            0.0,
+            0.001,
+            key="multigraph_builder_inter_layer_threshold",
+            help="Inter-layer edge weights below this are set to zero before graph assembly.",
+        )
+
+    gamma = st.slider(
+        "Gamma (negative jump probability)",
+        0.0,
+        1.0,
+        0.01,
+        0.01,
+        key="multigraph_builder_gamma",
+        help="Used only for Shadow multigraph.",
+    )
+    if graph_topology != "Shadow multigraph":
+        st.caption("Gamma is only applied for Shadow multigraph topology.")
+
+    st.subheader("Thresholding + node cap")
+    p1, p2 = st.columns(2)
+    with p1:
+        threshold = st.slider(
+            "Edge threshold",
+            0.0,
+            0.05,
+            0.0,
+            0.001,
+            key="multigraph_builder_threshold",
+            help="Multigraph edges are probability-scaled; keep threshold low.",
+        )
+    with p2:
+        max_nodes = st.slider("Max nodes to render", 50, 1200, 300, 50, key="multigraph_builder_max_nodes")
+
+    generate_multigraph = st.button(
+        "Generate all graph generations",
+        key="multigraph_builder_generate_button",
+    )
+
+    graph = st.session_state.get("multigraph_builder_graph")
+
+    if generate_multigraph:
+        try:
+            from DiffusionRWR_model_package.graph_generation import edge_weight_functions
+            from DiffusionRWR_model_package.graph_generation.generate_multi_graph import (
+                create_multigraph_with_layer_transitions,
+                create_shadow_network_multigraph,
+            )
+
+            data_dict = {}
+            for csv_file in csv_files:
+                if csv_file.name in selected_datasets:
+                    data_dict[csv_file.stem] = standardize_rows(load_dataset(str(csv_file)))
+
+            if not data_dict:
+                st.error("No datasets selected.")
+                return
+
+            intra_layer_graphs = {}
+            sign_matrices = {}
+            for dataset_name, std_df in data_dict.items():
+                layer_adj = build_adjacency(std_df, method=method, n_power=n_power, sigma=sigma)
+                intra_layer_graphs[dataset_name] = layer_adj
+
+                corr_matrix = std_df.T.corr()
+                sign_matrices[dataset_name] = pd.DataFrame(
+                    np.sign(corr_matrix.values), index=corr_matrix.index, columns=corr_matrix.columns
+                ).fillna(0)
+
+            edge_fn_base = getattr(edge_weight_functions, inter_method)
+
+            def edge_fn_inter(vec_a, vec_b):
+                if inter_method == "inter_layer_corr_power":
+                    weight = edge_fn_base(vec_a, vec_b, n_power=inter_n_power)
+                elif inter_method in {
+                    "cor_exponential_abs_inter",
+                    "cor_gaussian_abs_inter",
+                    "intra_layer_corr_exponential_shifted",
+                    "intra_layer_corr_gaussian_shifted",
+                }:
+                    weight = edge_fn_base(vec_a, vec_b, sigma=inter_sigma)
+                else:
+                    weight = edge_fn_base(vec_a, vec_b)
+                return weight if weight >= inter_layer_threshold else 0.0
+
+            if graph_topology == "Shadow multigraph":
+                multigraph_adjacency = create_shadow_network_multigraph(
+                    std_data_dict=data_dict,
+                    intra_graphs=intra_layer_graphs,
+                    sign_matrices=sign_matrices,
+                    edge_fn_inter=edge_fn_inter,
+                    gamma=gamma,
+                    alpha=alpha,
+                    start="e1",
+                    end="e5",
+                )
+            else:
+                multigraph_adjacency = create_multigraph_with_layer_transitions(
+                    std_data_dict=data_dict,
+                    intra_layer_graphs=intra_layer_graphs,
+                    edge_fn_inter=edge_fn_inter,
+                    alpha=alpha,
+                    start="e1",
+                    end="e5",
+                )
+
+            graph = graph_from_adjacency(multigraph_adjacency, threshold=threshold, max_nodes=max_nodes)
+            st.session_state["multigraph_builder_graph"] = graph
+            st.success("Multigraph generated.")
+        except Exception as e:
+            st.error(f"Multigraph construction failed: {str(e)}")
+            return
+
+    if graph is None:
+        st.info("Configure sliders and click 'Generate all graph generations' to build the multigraph.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rendered nodes", graph.number_of_nodes())
+    c2.metric("Rendered edges", graph.number_of_edges())
+    density = nx.density(graph) if graph.number_of_nodes() > 1 else 0.0
+    c3.metric("Density", f"{density:.4f}")
+
+    st.subheader("Centrality visualization")
+    centrality_choice = st.selectbox(
+        "Node size based on",
+        ["degree", "eigenvector", "pagerank"],
+        key="multigraph_builder_centrality",
+    )
+
+    pagerank_alpha = 0.85
+    if centrality_choice == "pagerank":
+        pagerank_alpha = st.slider(
+            "PageRank alpha (damping factor)",
+            0.1,
+            0.99,
+            0.85,
+            0.05,
+            key="multigraph_builder_pagerank_alpha",
+        )
+
+    fig = plot_graph_2d(graph, centrality_type=centrality_choice, pagerank_alpha=pagerank_alpha)
+    st.plotly_chart(fig, use_container_width=True)
+
+    with st.expander("Show top hubs"):
+        if graph.number_of_nodes() == 0:
+            st.info("No graph nodes available.")
+        else:
+            out_deg = sorted(graph.out_degree, key=lambda x: x[1], reverse=True)[:20]
+            in_deg = sorted(graph.in_degree, key=lambda x: x[1], reverse=True)[:20]
+            left, right = st.columns(2)
+            left.dataframe(pd.DataFrame(out_deg, columns=["node", "out_degree"]), use_container_width=True)
+            right.dataframe(pd.DataFrame(in_deg, columns=["node", "in_degree"]), use_container_width=True)
+
+    with st.expander("Show top centrality"):
+        if graph.number_of_nodes() == 0:
+            st.info("No graph nodes available.")
+        else:
+            if centrality_choice == "eigenvector":
+                centrality = compute_eigenvector_centrality(graph)
+            elif centrality_choice == "pagerank":
+                centrality = compute_pagerank_centrality(graph, alpha=pagerank_alpha)
+            else:
+                centrality = compute_degree_centrality(graph)
+
+            top_centrality = sorted(centrality.items(), key=lambda x: x[1], reverse=True)[:20]
+            st.dataframe(
+                pd.DataFrame(top_centrality, columns=["node", f"{centrality_choice}_centrality"]),
+                use_container_width=True,
+            )
+
+
 
 def show_outputs_page():
     st.title("Existing outputs")
@@ -657,27 +996,63 @@ def show_outputs_page():
 def show_combined_lasso_anchors_page():
     st.title("Combined Lasso + Temporal Anchors")
 
-    adjacency = load_combined_lasso_adjacency()
-    if adjacency.empty:
-        st.error("Could not load combined modelled datasets for Lasso analysis.")
+    selected_lasso_sources = st.multiselect(
+        "Datasets to include in combined Lasso",
+        options=list(LASSO_COMBINED_SOURCE_MAP.keys()),
+        default=list(LASSO_COMBINED_SOURCE_MAP.keys()),
+        key="combined_lasso_sources",
+    )
+    if not selected_lasso_sources:
+        st.warning("Select at least one dataset for combined Lasso generation.")
         return
 
-    st.caption("Combined dataset: RNA + K20me3 + K9me2 with basis vectors handled by Lasso graph builder.")
+    st.caption(
+        "Combined dataset includes: " + ", ".join(selected_lasso_sources) +
+        " (basis vectors handled by Lasso graph builder)."
+    )
 
     edge_cutoff = st.slider("Minimum edge weight", 0.0, 1.0, 0.001, 0.001)
+    lasso_alpha = st.slider("Lambda (Lasso regularisation)", 0.0001, 1.0, 0.01, 0.0001, key="combined_lasso_lambda")
     max_nodes = st.slider("Max nodes to render", 100, 2400, 900, 50)
 
-    adjacency_filtered = adjacency.copy()
-    adjacency_filtered[adjacency_filtered < edge_cutoff] = 0.0
+    generate_lasso_graph = st.button("Generate combined Lasso graph", key="combined_lasso_generate_button")
+    lasso_signature = (tuple(sorted(selected_lasso_sources)), float(edge_cutoff), float(lasso_alpha), int(max_nodes))
 
-    basis_nodes = [basis for basis in ["e1", "e2", "e3", "e4", "e5"] if basis in adjacency_filtered.index]
+    if generate_lasso_graph:
+        combined_std = load_combined_standardized_selected(tuple(selected_lasso_sources))
+        adjacency = build_lasso_adjacency_from_standardized(combined_std, key="combined_rna_histones", lasso_alpha=lasso_alpha)
+        if adjacency.empty:
+            st.error("Could not load/generate combined modelled datasets for Lasso analysis.")
+            return
 
-    graph = graph_from_adjacency_with_forced_nodes(
-        adjacency=adjacency_filtered,
-        threshold=edge_cutoff,
-        max_nodes=max_nodes,
-        forced_nodes=basis_nodes,
-    )
+        adjacency_filtered = adjacency.copy()
+        adjacency_filtered[adjacency_filtered < edge_cutoff] = 0.0
+        basis_nodes = [basis for basis in ["e1", "e2", "e3", "e4", "e5"] if basis in adjacency_filtered.index]
+
+        graph = graph_from_adjacency_with_forced_nodes(
+            adjacency=adjacency_filtered,
+            threshold=edge_cutoff,
+            max_nodes=max_nodes,
+            forced_nodes=basis_nodes,
+        )
+
+        st.session_state["combined_lasso_signature"] = lasso_signature
+        st.session_state["combined_lasso_graph_data"] = nx.node_link_data(graph)
+        st.session_state["combined_lasso_adjacency_filtered"] = adjacency_filtered
+        st.session_state["combined_lasso_basis_nodes"] = basis_nodes
+        st.success("Combined Lasso graph generated.")
+
+    if st.session_state.get("combined_lasso_signature") != lasso_signature:
+        st.info("Adjust parameters and click 'Generate combined Lasso graph' to update.")
+        return
+
+    if "combined_lasso_graph_data" not in st.session_state:
+        st.info("Click 'Generate combined Lasso graph' to build the graph.")
+        return
+
+    graph = nx.node_link_graph(st.session_state["combined_lasso_graph_data"], directed=True)
+    adjacency_filtered = st.session_state["combined_lasso_adjacency_filtered"]
+    basis_nodes = st.session_state["combined_lasso_basis_nodes"]
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Nodes", graph.number_of_nodes())
@@ -785,6 +1160,20 @@ def show_diffusion_simulator_page():
     with col1:
         if method == "lasso_linear_regression":
             lasso_scope = st.selectbox("Lasso datasets", ["All datasets (combined)", "Single dataset"], key="diffusion_lasso_scope")
+            lasso_combined_sources = st.multiselect(
+                "Combined Lasso include",
+                options=list(LASSO_COMBINED_SOURCE_MAP.keys()),
+                default=list(LASSO_COMBINED_SOURCE_MAP.keys()),
+                key="diffusion_lasso_combined_sources",
+            )
+            lasso_alpha = st.slider(
+                "Lambda (Lasso regularisation)",
+                min_value=0.0001,
+                max_value=1.0,
+                value=0.01,
+                step=0.0001,
+                key="diffusion_lasso_lambda",
+            )
         else:
             selected_dataset = st.selectbox("Select dataset", options=csv_files, format_func=lambda p: p.name, key="diffusion_dataset")
     
@@ -840,8 +1229,10 @@ def show_diffusion_simulator_page():
     # Handle dataset selection for Lasso
     if method == "lasso_linear_regression":
         if lasso_scope == "All datasets (combined)":
-            # Use combined dataset
-            df = load_combined_standardized()
+            if not lasso_combined_sources:
+                st.error("Select at least one dataset for combined Lasso.")
+                return
+            df = load_combined_standardized_selected(tuple(lasso_combined_sources))
             if df.empty:
                 st.error("Could not load combined datasets for Lasso analysis.")
                 return
@@ -984,6 +1375,7 @@ def show_diffusion_simulator_page():
             start=start_gene,
             end=end_gene,
             return_signs=False,
+            lasso_alpha=lasso_alpha,
         )
         adjacency = adjacency_dict["data"]
         # Take absolute values to handle negative Lasso coefficients
@@ -1147,6 +1539,7 @@ def show_diffusion_simulator_page():
             "dataset": selected_dataset_name,
             "selected_datasets": selected_datasets,
             "lasso_scope": lasso_scope if method == "lasso_linear_regression" else None,
+            "lasso_alpha": float(lasso_alpha) if method == "lasso_linear_regression" else None,
             "n_power": int(n_power),
             "sigma": float(sigma),
             "threshold": float(threshold),
@@ -1929,6 +2322,575 @@ def show_histone_cluster_analysis_page():
             st.error(f"histone_cluster_analysis failed: {str(e)}")
 
 
+def _plot_clustered_graph(adjacency: pd.DataFrame, labels_df: pd.DataFrame, title: str) -> go.Figure:
+    graph = nx.from_pandas_adjacency(adjacency, create_using=nx.DiGraph)
+    if graph.number_of_nodes() == 0:
+        fig = go.Figure()
+        fig.update_layout(title=f"{title}: No nodes")
+        return fig
+
+    pos = nx.spring_layout(graph, seed=42, k=0.55)
+
+    edge_x, edge_y = [], []
+    for source, target in graph.edges():
+        x0, y0 = pos[source]
+        x1, y1 = pos[target]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+    edge_trace = go.Scatter(
+        x=edge_x,
+        y=edge_y,
+        mode="lines",
+        line=dict(width=0.6, color="rgba(130,130,130,0.4)"),
+        hoverinfo="none",
+        showlegend=False,
+    )
+
+    cluster_series = labels_df["cluster"]
+    node_x, node_y, node_color, node_size, node_text = [], [], [], [], []
+
+    for node in graph.nodes():
+        if node not in cluster_series.index:
+            continue
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        node_color.append(int(cluster_series.loc[node]))
+        degree = graph.in_degree(node) + graph.out_degree(node)
+        node_size.append(8 + 2.5 * np.sqrt(max(degree, 0)))
+        node_text.append(f"{node}<br>cluster={int(cluster_series.loc[node])}<br>degree={degree}")
+
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode="markers",
+        marker=dict(
+            size=node_size,
+            color=node_color,
+            colorscale="Turbo",
+            opacity=0.9,
+            colorbar=dict(title="Cluster"),
+            line=dict(width=0.7, color="white"),
+        ),
+        text=node_text,
+        hoverinfo="text",
+        showlegend=False,
+    )
+
+    fig = go.Figure(data=[edge_trace, node_trace])
+    fig.update_layout(
+        title=title,
+        margin=dict(l=10, r=10, t=55, b=10),
+        xaxis=dict(showgrid=False, zeroline=False, visible=False),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False),
+        height=620,
+    )
+    return fig
+
+
+def show_graph_clustering_nmi_page():
+    st.title("Multi-Graph Clustering + NMI")
+    st.write("Generate multiple graph types, run spectral clustering, and compare clusterings via mutual information.")
+
+    csv_files = discover_csv_files()
+    if not csv_files:
+        st.error(f"No CSV files found in: {DATA_DIR}")
+        return
+
+    graph_options = [
+        "Correlation Power",
+        "Correlation Gaussian |r|",
+        "Correlation Exponential |r|",
+        "Lasso (combined)",
+        "Lasso (single dataset)",
+    ]
+    selected_graph_types = st.multiselect(
+        "Select graph types to generate",
+        options=graph_options,
+        default=["Correlation Power", "Correlation Gaussian |r|", "Lasso (combined)"],
+        key="cluster_nmi_graph_types",
+    )
+
+    if not selected_graph_types:
+        st.info("Select at least one graph type to continue.")
+        return
+
+    st.subheader("Global clustering parameters")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        n_clusters = st.slider("n_clusters", 2, 20, 4, key="cluster_nmi_n_clusters")
+    with c2:
+        assign_labels = st.selectbox(
+            "assign_labels",
+            ["kmeans", "discretize", "cluster_qr"],
+            index=0,
+            key="cluster_nmi_assign_labels",
+        )
+    with c3:
+        symmetrize = st.selectbox(
+            "symmetrize",
+            ["max", "mean", "min", "none"],
+            index=0,
+            key="cluster_nmi_symmetrize",
+        )
+    with c4:
+        nmi_method = st.selectbox(
+            "MI method",
+            ["normalized", "adjusted", "raw"],
+            index=0,
+            key="cluster_nmi_method",
+        )
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5:
+        clip_negative = st.checkbox("Clip negative weights", value=True, key="cluster_nmi_clip_negative")
+    with c6:
+        remove_isolated = st.checkbox("Remove isolated nodes", value=True, key="cluster_nmi_remove_isolated")
+    with c7:
+        add_self_loops = st.checkbox("Add tiny self-loops", value=False, key="cluster_nmi_add_self_loops")
+    with c8:
+        min_common_nodes = st.number_input(
+            "Min common nodes for MI",
+            min_value=2,
+            max_value=20000,
+            value=25,
+            step=1,
+            key="cluster_nmi_min_common_nodes",
+            help="Pairwise MI/NMI is only computed when two clusterings share at least this many nodes.",
+        )
+
+    st.subheader("Graph input datasets")
+    input_mode = st.selectbox(
+        "Input mode",
+        options=["Single dataset", "Multi-dataset (multigraph)"],
+        index=0,
+        key="cluster_nmi_input_mode",
+    )
+
+    selected_dataset = None
+    selected_multigraph_dataset_names: list[str] = []
+    multigraph_alpha = 0.1
+    multigraph_inter_method = "inter_layer_corr_power"
+    multigraph_inter_n_power = 20
+    multigraph_inter_sigma = 0.05
+    multigraph_inter_threshold = 0.0
+
+    if input_mode == "Single dataset":
+        selected_dataset = st.selectbox(
+            "Dataset for graph generation",
+            options=csv_files,
+            format_func=lambda p: p.name,
+            key="cluster_nmi_dataset",
+        )
+    else:
+        dataset_name_options = [p.name for p in csv_files]
+        selected_multigraph_dataset_names = st.multiselect(
+            "Datasets for multigraph layers",
+            options=dataset_name_options,
+            default=dataset_name_options,
+            key="cluster_nmi_multigraph_datasets",
+        )
+        if len(selected_multigraph_dataset_names) < 2:
+            st.warning("Select at least two datasets for multigraph clustering.")
+            return
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            multigraph_alpha = st.slider(
+                "alpha",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.1,
+                step=0.01,
+                key="cluster_nmi_multigraph_alpha",
+            )
+        with m2:
+            multigraph_inter_method = st.selectbox(
+                "Inter-layer method",
+                options=[
+                    "inter_layer_corr_power",
+                    "cor_exponential_abs_inter",
+                    "cor_gaussian_abs_inter",
+                    "intra_layer_corr_exponential_shifted",
+                    "intra_layer_corr_gaussian_shifted",
+                ],
+                index=0,
+                key="cluster_nmi_multigraph_inter_method",
+            )
+        with m3:
+            if multigraph_inter_method == "inter_layer_corr_power":
+                multigraph_inter_n_power = st.slider(
+                    "inter n_power",
+                    min_value=2,
+                    max_value=40,
+                    value=20,
+                    step=1,
+                    key="cluster_nmi_multigraph_inter_n_power",
+                )
+            else:
+                multigraph_inter_sigma = st.slider(
+                    "inter sigma",
+                    min_value=0.001,
+                    max_value=1.0,
+                    value=0.05,
+                    step=0.001,
+                    key="cluster_nmi_multigraph_inter_sigma",
+                )
+        with m4:
+            multigraph_inter_threshold = st.slider(
+                "inter threshold",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.0,
+                step=0.001,
+                key="cluster_nmi_multigraph_inter_threshold",
+            )
+
+    graph_params: dict[str, dict] = {}
+
+    for graph_type in selected_graph_types:
+        with st.expander(f"Parameters: {graph_type}", expanded=True):
+            p1, p2, p3 = st.columns(3)
+            with p1:
+                threshold = st.slider(
+                    "Edge threshold",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.15,
+                    step=0.01,
+                    key=f"cluster_nmi_threshold_{graph_type}",
+                )
+            with p2:
+                max_nodes = st.slider(
+                    "Max nodes",
+                    min_value=50,
+                    max_value=2000,
+                    value=300,
+                    step=50,
+                    key=f"cluster_nmi_max_nodes_{graph_type}",
+                )
+
+            method = None
+            n_power = 20
+            sigma = 0.05
+            lasso_scope = None
+            lasso_dataset = None
+            lasso_combined_sources = []
+            lasso_alpha = 0.01
+
+            with p3:
+                if graph_type == "Correlation Power":
+                    method = "corr_power"
+                    n_power = st.slider(
+                        "n_power",
+                        min_value=2,
+                        max_value=40,
+                        value=20,
+                        step=1,
+                        key=f"cluster_nmi_n_power_{graph_type}",
+                    )
+                elif graph_type == "Correlation Gaussian |r|":
+                    method = "cor_gaussian_abs"
+                    sigma = st.slider(
+                        "sigma",
+                        min_value=0.001,
+                        max_value=1.0,
+                        value=0.05,
+                        step=0.001,
+                        key=f"cluster_nmi_sigma_{graph_type}",
+                    )
+                elif graph_type == "Correlation Exponential |r|":
+                    method = "cor_exponential_abs"
+                    sigma = st.slider(
+                        "sigma",
+                        min_value=0.001,
+                        max_value=1.0,
+                        value=0.05,
+                        step=0.001,
+                        key=f"cluster_nmi_sigma_{graph_type}",
+                    )
+                elif graph_type == "Lasso (combined)":
+                    lasso_scope = "combined"
+                    lasso_alpha = st.slider(
+                        "lambda",
+                        min_value=0.0001,
+                        max_value=1.0,
+                        value=0.01,
+                        step=0.0001,
+                        key=f"cluster_nmi_lasso_lambda_{graph_type}",
+                    )
+                    lasso_combined_sources = st.multiselect(
+                        "Included datasets",
+                        options=list(LASSO_COMBINED_SOURCE_MAP.keys()),
+                        default=list(LASSO_COMBINED_SOURCE_MAP.keys()),
+                        key=f"cluster_nmi_lasso_combined_sources_{graph_type}",
+                    )
+                elif graph_type == "Lasso (single dataset)":
+                    lasso_scope = "single"
+                    lasso_dataset = selected_dataset
+                    lasso_alpha = st.slider(
+                        "lambda",
+                        min_value=0.0001,
+                        max_value=1.0,
+                        value=0.01,
+                        step=0.0001,
+                        key=f"cluster_nmi_lasso_lambda_{graph_type}",
+                    )
+
+            graph_params[graph_type] = {
+                "threshold": float(threshold),
+                "max_nodes": int(max_nodes),
+                "method": method,
+                "n_power": int(n_power),
+                "sigma": float(sigma),
+                "lasso_scope": lasso_scope,
+                "lasso_dataset": lasso_dataset,
+                "lasso_combined_sources": lasso_combined_sources,
+                "lasso_alpha": float(lasso_alpha),
+                "input_mode": input_mode,
+                "selected_multigraph_dataset_names": selected_multigraph_dataset_names,
+                "multigraph_alpha": float(multigraph_alpha),
+                "multigraph_inter_method": multigraph_inter_method,
+                "multigraph_inter_n_power": int(multigraph_inter_n_power),
+                "multigraph_inter_sigma": float(multigraph_inter_sigma),
+                "multigraph_inter_threshold": float(multigraph_inter_threshold),
+            }
+
+    if st.button("Generate graphs, cluster, and compute MI", key="run_cluster_nmi"):
+        generated_graphs: dict[str, pd.DataFrame] = {}
+        graph_build_log: list[dict] = []
+
+        try:
+            for graph_type in selected_graph_types:
+                params = graph_params[graph_type]
+
+                if params.get("input_mode") == "Multi-dataset (multigraph)":
+                    selected_names = params.get("selected_multigraph_dataset_names", [])
+                    if len(selected_names) < 2:
+                        st.warning(f"Skipping {graph_type}: select at least two datasets for multigraph mode.")
+                        continue
+
+                    name_to_path = {p.name: p for p in csv_files}
+                    std_data_dict: dict[str, pd.DataFrame] = {}
+                    intra_layer_graphs: dict[str, pd.DataFrame] = {}
+
+                    if graph_type == "Lasso (combined)":
+                        selected_sources = params.get("lasso_combined_sources", [])
+                        if len(selected_sources) < 2:
+                            st.warning("Skipping Lasso (combined): pick at least two included datasets for multigraph mode.")
+                            continue
+
+                        selected_layer_names = set(selected_names)
+                        for source_name in selected_sources:
+                            source_info = LASSO_COMBINED_SOURCE_MAP.get(source_name)
+                            if not source_info:
+                                continue
+                            filename, suffix = source_info
+                            layer_name = filename
+                            if layer_name not in selected_layer_names:
+                                continue
+                            source_path = DATA_DIR / filename
+                            if not source_path.exists():
+                                continue
+                            source_df = _load_modelled_csv(source_path)
+                            source_std = standardize_rows(source_df)
+                            std_data_dict[layer_name] = source_std
+                            intra_layer_graphs[layer_name] = build_lasso_adjacency_from_standardized(
+                                source_std,
+                                key=layer_name,
+                                lasso_alpha=params.get("lasso_alpha", 0.01),
+                            )
+                    else:
+                        for dataset_name in selected_names:
+                            dataset_path = name_to_path.get(dataset_name)
+                            if dataset_path is None:
+                                continue
+                            raw_df = load_dataset(str(dataset_path))
+                            df_std = standardize_rows(raw_df)
+                            std_data_dict[dataset_name] = df_std
+                            if graph_type in ["Correlation Power", "Correlation Gaussian |r|", "Correlation Exponential |r|"]:
+                                intra_layer_graphs[dataset_name] = build_adjacency(
+                                    df_std,
+                                    method=params["method"],
+                                    n_power=params["n_power"],
+                                    sigma=params["sigma"],
+                                )
+                            else:
+                                intra_layer_graphs[dataset_name] = build_lasso_adjacency_from_standardized(
+                                    df_std,
+                                    key=dataset_name,
+                                    lasso_alpha=params.get("lasso_alpha", 0.01),
+                                )
+
+                    if len(std_data_dict) < 2 or len(intra_layer_graphs) < 2:
+                        st.warning(f"Skipping {graph_type}: insufficient dataset layers after loading.")
+                        continue
+
+                    adjacency = build_multigraph_adjacency_for_clustering(
+                        std_data_dict=std_data_dict,
+                        intra_layer_graphs=intra_layer_graphs,
+                        alpha=params.get("multigraph_alpha", 0.1),
+                        inter_method=params.get("multigraph_inter_method", "inter_layer_corr_power"),
+                        inter_n_power=params.get("multigraph_inter_n_power", 20),
+                        inter_sigma=params.get("multigraph_inter_sigma", 0.05),
+                        inter_layer_threshold=params.get("multigraph_inter_threshold", 0.0),
+                    )
+                    if adjacency.empty:
+                        st.warning(f"Skipping {graph_type}: multigraph adjacency is empty.")
+                        continue
+                else:
+                    if graph_type in ["Correlation Power", "Correlation Gaussian |r|", "Correlation Exponential |r|"]:
+                        raw_df = load_dataset(str(selected_dataset))
+                        df_std = standardize_rows(raw_df)
+                        adjacency = build_adjacency(
+                            df_std,
+                            method=params["method"],
+                            n_power=params["n_power"],
+                            sigma=params["sigma"],
+                        )
+                    elif graph_type == "Lasso (combined)":
+                        selected_sources = params.get("lasso_combined_sources", [])
+                        if not selected_sources:
+                            st.warning("Skipping Lasso (combined): no datasets selected for combined Lasso.")
+                            continue
+                        df_std = load_combined_standardized_selected(tuple(selected_sources))
+                        if df_std.empty:
+                            st.warning("Skipping Lasso (combined): combined dataset unavailable.")
+                            continue
+                        adjacency = build_lasso_adjacency_from_standardized(
+                            df_std,
+                            key="combined",
+                            lasso_alpha=params.get("lasso_alpha", 0.01),
+                        )
+                    else:
+                        raw_df = load_dataset(str(params["lasso_dataset"]))
+                        df_std = standardize_rows(raw_df)
+                        adjacency = build_lasso_adjacency_from_standardized(
+                            df_std,
+                            key="single",
+                            lasso_alpha=params.get("lasso_alpha", 0.01),
+                        )
+
+                graph_nx = graph_from_adjacency(
+                    adjacency,
+                    threshold=params["threshold"],
+                    max_nodes=params["max_nodes"],
+                )
+
+                if graph_nx.number_of_nodes() == 0:
+                    st.warning(f"Skipping {graph_type}: no nodes after thresholding.")
+                    continue
+
+                adjacency_filtered = nx.to_pandas_adjacency(graph_nx, dtype=float)
+                if graph_type == "Lasso (single dataset)" and params.get("input_mode") == "Single dataset":
+                    graph_name = f"Lasso (single): {selected_dataset.name}"
+                elif params.get("input_mode") == "Multi-dataset (multigraph)":
+                    graph_name = f"{graph_type} (multigraph)"
+                else:
+                    graph_name = graph_type
+                generated_graphs[graph_name] = adjacency_filtered
+
+                graph_build_log.append(
+                    {
+                        "graph": graph_name,
+                        "nodes": int(graph_nx.number_of_nodes()),
+                        "edges": int(graph_nx.number_of_edges()),
+                        "total_weight": float(adjacency_filtered.values.sum()),
+                        "threshold": params["threshold"],
+                        "max_nodes": params["max_nodes"],
+                    }
+                )
+
+            if not generated_graphs:
+                st.error("No graphs were generated successfully. Adjust thresholds/parameters and try again.")
+                return
+
+            eligible_graphs = {k: v for k, v in generated_graphs.items() if v.shape[0] >= n_clusters}
+            skipped = [k for k, v in generated_graphs.items() if v.shape[0] < n_clusters]
+
+            if skipped:
+                st.warning(
+                    "Skipping graphs with fewer nodes than n_clusters: " + ", ".join(skipped)
+                )
+
+            if not eligible_graphs:
+                st.error("No graph has enough nodes for the selected n_clusters.")
+                return
+
+            clustering_results = cluster_multiple_graphs(
+                graphs=eligible_graphs,
+                n_clusters=n_clusters,
+                method="spectral",
+                assign_labels=assign_labels,
+                symmetrize=symmetrize,
+                clip_negative=clip_negative,
+                remove_isolated=remove_isolated,
+                add_self_loops=add_self_loops,
+            )
+
+            st.success("Graph generation and spectral clustering completed.")
+            st.subheader("Generated graph summary")
+            st.dataframe(pd.DataFrame(graph_build_log), use_container_width=True)
+
+            st.subheader("Clustered graph visualizations")
+            for graph_name, result in clustering_results.items():
+                labels_df = result["labels"]
+                affinity_df = result["affinity"]
+                fig = _plot_clustered_graph(
+                    adjacency=affinity_df,
+                    labels_df=labels_df,
+                    title=f"{graph_name} | Spectral clusters",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(labels_df.head(100), use_container_width=True)
+
+            graph_names = list(clustering_results.keys())
+            overlap_matrix = pd.DataFrame(index=graph_names, columns=graph_names, dtype=int)
+            for g_a in graph_names:
+                idx_a = clustering_results[g_a]["labels"].index
+                for g_b in graph_names:
+                    idx_b = clustering_results[g_b]["labels"].index
+                    overlap_matrix.loc[g_a, g_b] = int(len(idx_a.intersection(idx_b)))
+
+            st.subheader("Node overlap diagnostics")
+            st.dataframe(overlap_matrix, use_container_width=True)
+            if len(graph_names) >= 2:
+                off_diag = overlap_matrix.values.copy()
+                np.fill_diagonal(off_diag, np.nan)
+                min_overlap = np.nanmin(off_diag)
+                if np.isfinite(min_overlap) and min_overlap < int(min_common_nodes):
+                    st.warning(
+                        "Some graph pairs share very few nodes. This can produce misleadingly high MI/NMI scores. "
+                        "Increase overlap (or lower threshold) and/or raise 'Min common nodes for MI'."
+                    )
+
+            if len(clustering_results) >= 2:
+                mi_matrix, mi_table = calculate_pairwise_mutual_information(
+                    clustering_results,
+                    method=nmi_method,
+                    label_column="cluster",
+                    min_common_nodes=int(min_common_nodes),
+                )
+
+                st.subheader(f"{nmi_method.upper()} mutual information matrix")
+                fig_mi = px.imshow(
+                    mi_matrix,
+                    text_auto=".3f",
+                    color_continuous_scale="Viridis",
+                    aspect="auto",
+                    title=f"Pairwise {nmi_method.upper()} between graph clusterings",
+                )
+                fig_mi.update_layout(height=500)
+                st.plotly_chart(fig_mi, use_container_width=True)
+                st.dataframe(mi_table, use_container_width=True)
+            else:
+                st.info("At least two successfully clustered graphs are required to compute mutual information.")
+
+        except Exception as e:
+            st.error(f"Clustering/NMI pipeline failed: {str(e)}")
+
+
 def main():
     st.set_page_config(page_title="DiffusionRWR Visualiser", layout="wide")
 
@@ -1939,8 +2901,10 @@ def main():
             "Maths",
             "Dataset Explorer",
             "Graph Builder",
+            "Multigraph Builder",
             "Combined Lasso + Anchors",
             "Diffusion Simulator",
+            "Multi-Graph Clustering + NMI",
             "Start-to-End Pipeline",
             "Histone Cluster Analysis",
             "Existing Outputs",
@@ -1959,10 +2923,14 @@ def main():
         show_data_page()
     elif page == "Graph Builder":
         show_graph_builder_page()
+    elif page == "Multigraph Builder":
+        show_multigraph_builder_page()
     elif page == "Combined Lasso + Anchors":
         show_combined_lasso_anchors_page()
     elif page == "Diffusion Simulator":
         show_diffusion_simulator_page()
+    elif page == "Multi-Graph Clustering + NMI":
+        show_graph_clustering_nmi_page()
     elif page == "Start-to-End Pipeline":
         show_start_to_end_page()
     elif page == "Histone Cluster Analysis":
