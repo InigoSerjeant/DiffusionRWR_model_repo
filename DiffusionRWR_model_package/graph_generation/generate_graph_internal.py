@@ -150,7 +150,7 @@ def generate_negative_correlation_graphs(std_data_dict, neg_edge_fn, start='e3',
     
     return negative_adj_dict
 
-def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_signs=False, lasso_alpha=0.01):
+def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_signs=False, lasso_lambda=0.01):
     """
     Generate single-layer graph adjacency matrix using Lasso regressions.
 
@@ -172,10 +172,10 @@ def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_
             standard_basis_std_mg[i] = (standard_basis_mg[i] - row_mean) / row_std
 
     # Lasso regularization (lower = more edges, higher = sparser)
-    lasso_alpha = float(lasso_alpha)
+    lasso_lambda = float(lasso_lambda)
     max_iter = 10000
     tol = 1e-3  # Relaxed from 1e-6 (underdetermined system with 5 samples)
-    print(f"Lasso regularization alpha: {lasso_alpha}")
+    print(f"Lasso regularization lambda: {lasso_lambda}")
     
 
     adjacency_df_dict = {}
@@ -211,7 +211,7 @@ def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_
             X = node_matrix[predictor_mask, :].T  # (5, n_nodes-1)
             y = node_matrix[target_idx, :]        # (5,)
 
-            lasso_model = Lasso(alpha=lasso_alpha, fit_intercept=True, max_iter=max_iter, tol=tol, selection='cyclic')
+            lasso_model = Lasso(alpha=lasso_lambda, fit_intercept=True, max_iter=max_iter, tol=tol, selection='cyclic')
             lasso_model.fit(X, y)
             coefficients = lasso_model.coef_
             coefficients[np.abs(coefficients) < 1e-12] = 0.0
@@ -257,7 +257,7 @@ def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_
         print(f"Highest number of incoming edges: {max_in} (nodes: {max_in_nodes[0]})")
         print(f"Lowest number of incoming edges: {min_in} (nodes: {min_in_nodes[0]})")
         print(f"Adjacency matrix shape: {adjacency_df.shape}")
-        print(f"Lasso regularization alpha: {lasso_alpha}")
+        print(f"Lasso regularization lambda: {lasso_lambda}")
 
         adjacency_df_dict[data_label] = adjacency_df
         if return_signs:
@@ -266,3 +266,22 @@ def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_
     if return_signs:
         return adjacency_df_dict, sign_matrix_dict
     return adjacency_df_dict
+
+def SPD_lasso_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_signs=False, lasso_lambda=0.01):
+    """
+    Generate single-layer graph adjacency matrix using Lasso regressions with positive weights only.
+    Same as lasso_single_graph but with non-negativity constraint on coefficients.
+    """
+    print("\nGenerating single-layer graph using Lasso edge construction (non-negative)")
+    
+    # The implementation would be similar to lasso_single_graph but using Lasso with positive=True
+    # This is a placeholder to indicate where the code would go. The actual implementation would
+    # involve replacing the Lasso model with one that enforces non-negativity and adjusting the fitting process accordingly.
+    
+    # For example, you could use sklearn's Lasso with positive=True:
+    # from sklearn.linear_model import Lasso
+    # lasso_model = Lasso(alpha=lasso_lambda, fit_intercept=True, max_iter=max_iter, tol=tol, selection='cyclic', positive=True)
+    
+    # The rest of the code structure would be similar to lasso_single_graph, iterating over datasets and target nodes.
+    
+    pass  # Replace with actual implementation

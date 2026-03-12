@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
-from ..graph_generation.preprocess_data import load_data
+from ..data_sorting import load_data
 from ..graph_generation.generate_graph_internal import generate_single_layer_graphs, lasso_single_graph
 from ..graph_generation.generate_multi_graph import create_multigraph
 from ..graph_generation.edge_weight_functions import corr_power, cor_gaussian_shifted

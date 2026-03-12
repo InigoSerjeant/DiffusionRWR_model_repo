@@ -50,10 +50,11 @@ Edit parameters in `main.py`:
 ```
 DiffusionRWR_model_package/
 ├── graph_generation/
-│   ├── preprocess_data.py          # Data loading and preprocessing
 │   ├── generate_graph_internal.py  # Intra-layer graph generation
 │   ├── generate_multi_graph.py     # Multi-layer graph assembly
 │   └── edge_weight_functions.py    # Edge weight computation
+├── data_sorting/
+│   └── data_sorting.py             # Data loading and preprocessing
 ├── run_RWR/
 │   ├── slow_RWR.py                 # Standard RWR implementation
 │   └── numba_RWR.py                # Fast Numba-optimized RWR

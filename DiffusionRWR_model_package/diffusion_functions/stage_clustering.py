@@ -10,7 +10,7 @@ from DiffusionRWR_model_package.graph_generation.generate_multi_graph import (
 	create_multigraph_with_layer_transitions,
 	create_shadow_network_multigraph,
 )
-from DiffusionRWR_model_package.graph_generation.preprocess_data import load_data
+from DiffusionRWR_model_package.data_sorting import load_data
 from DiffusionRWR_model_package.graph_generation.generate_graph_internal import generate_single_layer_graphs
 from DiffusionRWR_model_package.graph_generation.edge_weight_functions import (
 	cor_gaussian_abs,

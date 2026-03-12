@@ -6,10 +6,10 @@ import inspect
 import plotly.graph_objects as go
 
 # Import subpackages
-from DiffusionRWR_model_package.graph_generation.preprocess_data import load_data
 from DiffusionRWR_model_package.graph_generation.generate_graph_internal import generate_single_layer_graphs, generate_negative_correlation_graphs
 from DiffusionRWR_model_package.graph_generation.generate_multi_graph import create_multigraph, create_multigraph_with_layer_transitions, create_shadow_network_multigraph
 from DiffusionRWR_model_package.graph_generation.edge_weight_functions import corr_power, negative_correlation_weight, negative_correlation_weight_exponential
+from DiffusionRWR_model_package.data_sorting import load_and_process_modelled_data
 from DiffusionRWR_model_package.run_RWR.slow_RWR import simulate_random_walks
 from DiffusionRWR_model_package.run_RWR.numba_RWR import simulate_walks_to_rna_FAST
 from DiffusionRWR_model_package.model_analysis.PCA_frequency_plot import plot_trajectory_visit_frequencies, plot_shortest_trajectories, plot_ideal_trajectory
@@ -32,6 +32,7 @@ restart_prob=0.0
 n_simulations=10000
 n_power=20
 sigma=0.05
+histone_dataset_filter="k20me3"
 folder_path = r"C:\Users\inigo\OneDrive\Documents\Fourth_Year\Computations\Dissertation\DiffusionRWR_model_repo\DiffusionRWR_model_package\data\Modelled"
 
 
@@ -56,22 +57,12 @@ def histone_cluster_analysis():
     
     # Step 1: Load data from modelled folder
     print("\n[STEP 1] Loading data...")
-    data_dict = load_data(folder_path)
-    for name, df in list(data_dict.items()):
-        if 'k9me2' in name:
-            data_dict.pop(name)
-    
-    # Clean up dataset names to remove prefixes and suffixes
-    cleaned_data_dict = {}
-    for key, df in data_dict.items():
-        # Extract dataset type: k20me3 or rna_ai (k9me2 already removed)
-        if 'k20me3' in key:
-            clean_name = 'k20me3'
-        elif 'rna' in key:
-            clean_name = 'rna_ai'
-        else:
-            clean_name = key
-        cleaned_data_dict[clean_name] = df
+    selected_histone = str(histone_dataset_filter).strip().lower()
+    cleaned_data_dict = load_and_process_modelled_data(
+        folder_path=folder_path,
+        histone_dataset_filter=selected_histone,
+        require_rna=True,
+    )
     
     print(f"\nCleaned dataset names: {list(cleaned_data_dict.keys())}")
 

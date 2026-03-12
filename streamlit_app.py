@@ -2,6 +2,7 @@ from pathlib import Path
 import io
 import json
 import zipfile
+import re
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -12,16 +13,98 @@ from DiffusionRWR_model_package.diffusion_functions.clustering_analysis import (
     cluster_multiple_graphs,
     calculate_pairwise_mutual_information,
 )
+from DiffusionRWR_model_package.model_analysis.app_math import (
+    is_integer_like as pkg_is_integer_like,
+    standardize_rows as pkg_standardize_rows,
+    build_adjacency as pkg_build_adjacency,
+    graph_from_adjacency as pkg_graph_from_adjacency,
+    graph_from_adjacency_with_forced_nodes as pkg_graph_from_adjacency_with_forced_nodes,
+    compute_eigenvector_centrality as pkg_compute_eigenvector_centrality,
+    compute_pagerank_centrality as pkg_compute_pagerank_centrality,
+    compute_degree_centrality as pkg_compute_degree_centrality,
+    closest_nodes_to_basis as pkg_closest_nodes_to_basis,
+    build_multigraph_adjacency_for_clustering as pkg_build_multigraph_adjacency_for_clustering,
+    simulate_diffusion_visits,
+)
 
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "DiffusionRWR_model_package" / "data" / "Modelled"
 OUTPUT_DIR = ROOT / "DiffusionRWR_model_package" / "outputs"
-LASSO_COMBINED_SOURCE_MAP = {
-    "RNA": ("overlap_filtered_rna_ai_m_v2.csv", "RNA"),
-    "K20me3": ("overlap_filtered_k20me3_m_v2.csv", "K20me3"),
-    "K9me2": ("overlap_filtered_k9me2_m_v2.csv", "K9me2"),
-}
+
+
+def _discover_lasso_combined_source_map() -> dict[str, tuple[str, str]]:
+    pattern = re.compile(r"^overlap_filtered_(.+)_m_v2\.csv$", re.IGNORECASE)
+    source_map: dict[str, tuple[str, str]] = {}
+
+    if not DATA_DIR.exists():
+        return source_map
+
+    for path in sorted(DATA_DIR.glob("overlap_filtered_*_m_v2.csv")):
+        match = pattern.match(path.name)
+        if not match:
+            continue
+
+        token = match.group(1)
+        if token.lower().startswith("rna"):
+            suffix = "RNA"
+            label = "RNA"
+        else:
+            suffix = token[:1].upper() + token[1:]
+            label = suffix
+
+        if label in source_map:
+            alt_label = f"{label} ({path.stem})"
+            source_map[alt_label] = (path.name, suffix)
+        else:
+            source_map[label] = (path.name, suffix)
+
+    return source_map
+
+
+LASSO_COMBINED_SOURCE_MAP = _discover_lasso_combined_source_map()
+
+
+def _discover_histone_dataset_options(folder_path: str) -> list[str]:
+    modelled_dir = Path(folder_path)
+    if not modelled_dir.exists():
+        return []
+
+    token_pattern = re.compile(r"^overlap_filtered_(.+)_m_v2\.csv$", re.IGNORECASE)
+    options: list[str] = []
+    for path in sorted(modelled_dir.glob("overlap_filtered_*_m_v2.csv")):
+        match = token_pattern.match(path.name)
+        if not match:
+            continue
+        token = match.group(1).lower()
+        if token.startswith("rna"):
+            continue
+        if token not in options:
+            options.append(token)
+    return options
+
+
+def _discover_histone_start_nodes(folder_path: str, histone_token: str) -> list[str]:
+    modelled_dir = Path(folder_path)
+    if not modelled_dir.exists() or not histone_token:
+        return []
+
+    target_name = f"overlap_filtered_{histone_token}_m_v2.csv"
+    csv_path = modelled_dir / target_name
+    if not csv_path.exists():
+        return []
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return []
+
+    if len(df.columns) > 0 and (df.columns[0] == "Unnamed: 0" or "gene" in df.columns[0].lower()):
+        genes = df[df.columns[0]].dropna().astype(str).tolist()
+    else:
+        genes = df.index.astype(str).tolist()
+
+    return sorted([gene for gene in genes if gene and not gene.startswith("e")])
 
 
 def _json_safe(value):
@@ -61,6 +144,55 @@ def _build_export_zip(
     return buffer.getvalue()
 
 
+def _slugify_label(value: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z]+", "_", value.strip())
+    slug = slug.strip("_").lower()
+    return slug or "plot"
+
+
+def _plotly_chart_with_download(
+    fig: go.Figure,
+    *,
+    base_name: str,
+    button_label: str,
+    key: str,
+    params: dict,
+    csv_frames: dict[str, pd.DataFrame] | None = None,
+):
+    st.plotly_chart(fig, use_container_width=True)
+    safe_base = _slugify_label(base_name)
+    export_zip = _build_export_zip(
+        base_name=safe_base,
+        params=params,
+        plotly_fig=fig,
+        csv_frames=csv_frames,
+    )
+    st.download_button(
+        button_label,
+        data=export_zip,
+        file_name=f"{safe_base}_export.zip",
+        mime="application/zip",
+        key=key,
+    )
+
+
+def _show_graph_hyperparameters(title: str, params: dict):
+    with st.expander(title, expanded=False):
+        st.json(_json_safe(params), expanded=False)
+
+
+def _show_rendered_node_selection_explanation(include_forced_nodes: bool = False):
+    explanation = (
+        "Rendered-node subsetting: after edge-thresholding, node strength is computed as "
+        "row-sum + column-sum of the thresholded adjacency; if this exceeds the max-node cap, "
+        "the top-strength nodes are kept and the graph is induced on that subset."
+    )
+    if include_forced_nodes:
+        explanation += " In this view, forced nodes (for example temporal basis nodes) are always included."
+    explanation += " Isolated nodes are then removed in standard graph rendering."
+    st.caption(explanation)
+
+
 @st.cache_data
 def discover_csv_files() -> list[Path]:
     if not DATA_DIR.exists():
@@ -84,45 +216,19 @@ def load_dataset(path_str: str) -> pd.DataFrame:
 
 @st.cache_data
 def standardize_rows(df: pd.DataFrame) -> pd.DataFrame:
-    return df.sub(df.mean(axis=1), axis=0).div(df.std(axis=1), axis=0)
+    return pkg_standardize_rows(df)
 
 
 def _is_integer_like(value: str) -> bool:
-    try:
-        return float(value) % 1 == 0
-    except Exception:
-        return False
+    return pkg_is_integer_like(value)
 
 
 def build_adjacency(df: pd.DataFrame, method: str, n_power: int, sigma: float) -> pd.DataFrame:
-    corr = df.T.corr().fillna(0.0)
-
-    if method == "corr_power":
-        similarity = 0.5 * (corr + 1.0)
-        adjacency = np.abs(similarity.values) ** n_power
-    elif method == "cor_gaussian_abs":
-        abs_corr = np.abs(corr.values)
-        adjacency = np.exp(-0.5 * ((1.0 - abs_corr) / sigma) ** 2)
-    else:  # cor_exponential_abs
-        abs_corr = np.abs(corr.values)
-        adjacency = np.exp(-(1.0 - abs_corr) / sigma)
-
-    np.fill_diagonal(adjacency, 0.0)
-    return pd.DataFrame(adjacency, index=df.index, columns=df.index)
+    return pkg_build_adjacency(df, method, n_power, sigma)
 
 
 def graph_from_adjacency(adjacency: pd.DataFrame, threshold: float, max_nodes: int) -> nx.DiGraph:
-    filtered = adjacency.where(adjacency >= threshold, 0.0)
-
-    if max_nodes > 0 and len(filtered) > max_nodes:
-        node_strength = filtered.sum(axis=0) + filtered.sum(axis=1)
-        selected = node_strength.sort_values(ascending=False).head(max_nodes).index
-        filtered = filtered.loc[selected, selected]
-
-    graph = nx.from_pandas_adjacency(filtered, create_using=nx.DiGraph)
-    to_remove = [n for n in graph.nodes if graph.in_degree(n) == 0 and graph.out_degree(n) == 0]
-    graph.remove_nodes_from(to_remove)
-    return graph
+    return pkg_graph_from_adjacency(adjacency, threshold, max_nodes)
 
 
 def graph_from_adjacency_with_forced_nodes(
@@ -131,18 +237,7 @@ def graph_from_adjacency_with_forced_nodes(
     max_nodes: int,
     forced_nodes: list[str],
 ) -> nx.DiGraph:
-    filtered = adjacency.where(adjacency >= threshold, 0.0)
-
-    present_forced = [node for node in forced_nodes if node in filtered.index]
-
-    if max_nodes > 0 and len(filtered) > max_nodes:
-        node_strength = filtered.sum(axis=0) + filtered.sum(axis=1)
-        top_nodes = node_strength.sort_values(ascending=False).head(max_nodes).index.tolist()
-        selected = sorted(set(top_nodes).union(set(present_forced)))
-        filtered = filtered.loc[selected, selected]
-
-    graph = nx.from_pandas_adjacency(filtered, create_using=nx.DiGraph)
-    return graph
+    return pkg_graph_from_adjacency_with_forced_nodes(adjacency, threshold, max_nodes, forced_nodes)
 
 
 def _load_modelled_csv(path: Path) -> pd.DataFrame:
@@ -250,98 +345,43 @@ def build_multigraph_adjacency_for_clustering(
     inter_sigma: float,
     inter_layer_threshold: float,
 ) -> pd.DataFrame:
-    from DiffusionRWR_model_package.graph_generation import edge_weight_functions
-    from DiffusionRWR_model_package.graph_generation.generate_multi_graph import create_multigraph_with_layer_transitions
-
-    if not std_data_dict or not intra_layer_graphs:
-        return pd.DataFrame()
-
-    edge_fn_base = getattr(edge_weight_functions, inter_method, None)
-    if edge_fn_base is None:
-        raise ValueError(f"Inter-layer edge function not found: {inter_method}")
-
-    def edge_fn_inter(vec_a, vec_b):
-        if inter_method == "inter_layer_corr_power":
-            weight = edge_fn_base(vec_a, vec_b, n_power=inter_n_power)
-        elif inter_method in {
-            "cor_exponential_abs_inter",
-            "cor_gaussian_abs_inter",
-            "intra_layer_corr_exponential_shifted",
-            "intra_layer_corr_gaussian_shifted",
-        }:
-            weight = edge_fn_base(vec_a, vec_b, sigma=inter_sigma)
-        else:
-            weight = edge_fn_base(vec_a, vec_b)
-        return weight if weight >= inter_layer_threshold else 0.0
-
-    return create_multigraph_with_layer_transitions(
+    return pkg_build_multigraph_adjacency_for_clustering(
         std_data_dict=std_data_dict,
         intra_layer_graphs=intra_layer_graphs,
-        edge_fn_inter=edge_fn_inter,
         alpha=alpha,
-        start="e1",
-        end="e5",
+        inter_method=inter_method,
+        inter_n_power=inter_n_power,
+        inter_sigma=inter_sigma,
+        inter_layer_threshold=inter_layer_threshold,
     )
 
 
 def _node_group(node_name: str) -> str:
     if node_name.startswith("e") and len(node_name) == 2:
         return "basis"
-    if "_RNA" in node_name:
+    upper = node_name.upper()
+    if upper.endswith("_RNA"):
         return "rna"
-    if "_K20me3" in node_name:
-        return "k20"
-    if "_K9me2" in node_name:
-        return "k9"
+    suffix = upper.rsplit("_", 1)[-1] if "_" in upper else ""
+    if suffix.startswith("K") and "ME" in suffix:
+        return "histone"
     return "other"
 
 
 def compute_eigenvector_centrality(graph: nx.DiGraph) -> dict[str, float]:
-    """Compute eigenvector centrality for all nodes in the graph."""
-    try:
-        centrality = nx.eigenvector_centrality(graph, max_iter=1000, tol=1e-06)
-        return centrality
-    except Exception:
-        # Fallback to all ones if computation fails
-        return {node: 1.0 for node in graph.nodes}
+    return pkg_compute_eigenvector_centrality(graph)
 
 
 def compute_pagerank_centrality(graph: nx.DiGraph, alpha: float = 0.85) -> dict[str, float]:
-    """Compute PageRank centrality for all nodes in the graph."""
-    try:
-        centrality = nx.pagerank(graph, alpha=alpha, max_iter=1000, tol=1e-06)
-        return centrality
-    except Exception:
-        # Fallback to all ones if computation fails
-        return {node: 1.0 for node in graph.nodes}
+    return pkg_compute_pagerank_centrality(graph, alpha=alpha)
 
 
 def compute_degree_centrality(graph: nx.DiGraph) -> dict[str, float]:
-    """Compute degree centrality (in + out degree) for all nodes."""
-    return {node: graph.in_degree(node) + graph.out_degree(node) for node in graph.nodes}
+    return pkg_compute_degree_centrality(graph)
 
 
 def _closest_nodes_to_basis(graph: nx.DiGraph, pos: dict, basis_nodes: list[str]) -> dict[str, str]:
-    closest = {}
-    non_basis_nodes = [n for n in graph.nodes if n not in basis_nodes]
-    if not non_basis_nodes:
-        return closest
-
-    for basis in basis_nodes:
-        if basis not in pos:
-            continue
-        basis_xy = np.array(pos[basis])
-        best_node = None
-        best_dist = float("inf")
-        for node in non_basis_nodes:
-            node_xy = np.array(pos[node])
-            dist = float(np.linalg.norm(node_xy - basis_xy))
-            if dist < best_dist:
-                best_dist = dist
-                best_node = node
-        if best_node is not None:
-            closest[basis] = best_node
-    return closest
+    return pkg_closest_nodes_to_basis(graph, pos, basis_nodes)
 
 
 def plot_combined_temporal_graph(
@@ -401,8 +441,7 @@ def plot_combined_temporal_graph(
 
     default_type_colors = {
         "rna": "lightblue",
-        "k20": "lightcoral",
-        "k9": "lightgreen",
+        "histone": "lightcoral",
         "other": "gray",
         "basis": "black",
     }
@@ -601,6 +640,8 @@ def show_data_page():
         return
 
     selected = st.selectbox("Choose dataset", options=csv_files, format_func=lambda p: p.name)
+    dataset_name = selected.name
+    dataset_slug = _slugify_label(selected.stem)
     df = load_dataset(str(selected))
 
     st.write(f"Shape: {df.shape[0]} genes × {df.shape[1]} time points")
@@ -616,7 +657,18 @@ def show_data_page():
     flattened = flattened[np.isfinite(flattened)]
     if flattened.size > 0:
         fig = px.histogram(flattened, nbins=60, title=f"Value distribution: {selected.name}")
-        st.plotly_chart(fig, use_container_width=True)
+        hist_params = {
+            "page": "Dataset Explorer",
+            "dataset": dataset_name,
+            "nbins": 60,
+        }
+        _plotly_chart_with_download(
+            fig,
+            base_name=f"{dataset_slug}_value_distribution",
+            button_label="Download value distribution + parameters",
+            key="download_dataset_histogram",
+            params=hist_params,
+        )
 
     st.subheader("Correlation heatmap (top genes by variance)")
     top_n = st.slider("Top genes by variance", 20, 200, 60, 10)
@@ -629,7 +681,18 @@ def show_data_page():
     corr = num_df.loc[picked].T.corr()
     heat = px.imshow(corr, color_continuous_scale="RdBu", zmin=-1, zmax=1)
     heat.update_layout(height=700)
-    st.plotly_chart(heat, use_container_width=True)
+    heat_params = {
+        "page": "Dataset Explorer",
+        "dataset": dataset_name,
+        "top_genes": int(top_n),
+    }
+    _plotly_chart_with_download(
+        heat,
+        base_name=f"{dataset_slug}_correlation_heatmap",
+        button_label="Download correlation heatmap + parameters",
+        key="download_dataset_heatmap",
+        params=heat_params,
+    )
 
 
 
@@ -641,6 +704,7 @@ def show_graph_builder_page():
         return
 
     selected = st.selectbox("Dataset", options=csv_files, format_func=lambda p: p.name)
+    dataset_slug = _slugify_label(selected.stem)
     raw_df = load_dataset(str(selected))
     df = standardize_rows(raw_df)
 
@@ -651,7 +715,19 @@ def show_graph_builder_page():
 
     st.subheader("Thresholding + node cap")
     threshold = st.slider("Edge threshold", 0.0, 1.0, 0.15, 0.01)
-    max_nodes = st.slider("Max nodes to render", 50, 1200, 300, 50)
+    max_nodes = st.slider("Max nodes to render", 50, 3000, 300, 50)
+    _show_rendered_node_selection_explanation(include_forced_nodes=False)
+
+    graph_builder_params = {
+        "page": "Graph Builder",
+        "dataset": selected.name,
+        "method": method,
+        "n_power": int(n_power),
+        "sigma": float(sigma),
+        "threshold": float(threshold),
+        "max_nodes": int(max_nodes),
+    }
+    _show_graph_hyperparameters("Graph generation hyperparameters", graph_builder_params)
 
     generate_graph = st.button("Generate graph", key="graph_builder_generate_button")
     graph_signature = (str(selected), method, int(n_power), float(sigma), float(threshold), int(max_nodes))
@@ -695,7 +771,18 @@ def show_graph_builder_page():
         )
 
     fig = plot_graph_2d(graph, centrality_type=centrality_choice, pagerank_alpha=pagerank_alpha)
-    st.plotly_chart(fig, use_container_width=True)
+    graph_builder_plot_params = {
+        **graph_builder_params,
+        "centrality": centrality_choice,
+        "pagerank_alpha": float(pagerank_alpha) if centrality_choice == "pagerank" else None,
+    }
+    _plotly_chart_with_download(
+        fig,
+        base_name=f"{dataset_slug}_graph_builder",
+        button_label="Download graph visualization + parameters",
+        key="download_graph_builder_plot",
+        params=graph_builder_plot_params,
+    )
 
     with st.expander("Show top hubs"):
         if graph.number_of_nodes() == 0:
@@ -741,6 +828,7 @@ def show_multigraph_builder_page():
             ["Multi-layer", "Shadow multigraph"],
             key="multigraph_builder_topology",
         )
+        graph_topology_slug = _slugify_label(graph_topology)
     with c2:
         selected_datasets = st.multiselect(
             "Datasets",
@@ -823,7 +911,26 @@ def show_multigraph_builder_page():
             help="Multigraph edges are probability-scaled; keep threshold low.",
         )
     with p2:
-        max_nodes = st.slider("Max nodes to render", 50, 1200, 300, 50, key="multigraph_builder_max_nodes")
+        max_nodes = st.slider("Max nodes to render", 50, 3000, 300, 50, key="multigraph_builder_max_nodes")
+    _show_rendered_node_selection_explanation(include_forced_nodes=False)
+
+    multigraph_generation_params = {
+        "page": "Multigraph Builder",
+        "topology": graph_topology,
+        "selected_datasets": selected_datasets,
+        "intra_method": method,
+        "intra_n_power": int(n_power),
+        "intra_sigma": float(sigma),
+        "inter_method": inter_method,
+        "inter_n_power": int(inter_n_power),
+        "inter_sigma": float(inter_sigma),
+        "alpha": float(alpha),
+        "gamma": float(gamma),
+        "inter_layer_threshold": float(inter_layer_threshold),
+        "edge_threshold": float(threshold),
+        "max_nodes": int(max_nodes),
+    }
+    _show_graph_hyperparameters("Graph generation hyperparameters", multigraph_generation_params)
 
     generate_multigraph = st.button(
         "Generate all graph generations",
@@ -933,7 +1040,18 @@ def show_multigraph_builder_page():
         )
 
     fig = plot_graph_2d(graph, centrality_type=centrality_choice, pagerank_alpha=pagerank_alpha)
-    st.plotly_chart(fig, use_container_width=True)
+    multigraph_params = {
+        **multigraph_generation_params,
+        "centrality": centrality_choice,
+        "pagerank_alpha": float(pagerank_alpha) if centrality_choice == "pagerank" else None,
+    }
+    _plotly_chart_with_download(
+        fig,
+        base_name=f"multigraph_{graph_topology_slug}",
+        button_label="Download multigraph visualization + parameters",
+        key="download_multigraph_builder_plot",
+        params=multigraph_params,
+    )
 
     with st.expander("Show top hubs"):
         if graph.number_of_nodes() == 0:
@@ -1013,7 +1131,17 @@ def show_combined_lasso_anchors_page():
 
     edge_cutoff = st.slider("Minimum edge weight", 0.0, 1.0, 0.001, 0.001)
     lasso_alpha = st.slider("Lambda (Lasso regularisation)", 0.0001, 1.0, 0.01, 0.0001, key="combined_lasso_lambda")
-    max_nodes = st.slider("Max nodes to render", 100, 2400, 900, 50)
+    max_nodes = st.slider("Max nodes to render", 100, 3000, 900, 50)
+    _show_rendered_node_selection_explanation(include_forced_nodes=True)
+
+    combined_lasso_generation_params = {
+        "page": "Combined Lasso + Anchors",
+        "selected_sources": selected_lasso_sources,
+        "edge_cutoff": float(edge_cutoff),
+        "lasso_alpha": float(lasso_alpha),
+        "max_nodes": int(max_nodes),
+    }
+    _show_graph_hyperparameters("Graph generation hyperparameters", combined_lasso_generation_params)
 
     generate_lasso_graph = st.button("Generate combined Lasso graph", key="combined_lasso_generate_button")
     lasso_signature = (tuple(sorted(selected_lasso_sources)), float(edge_cutoff), float(lasso_alpha), int(max_nodes))
@@ -1093,7 +1221,18 @@ def show_combined_lasso_anchors_page():
         centrality_type=centrality_choice, 
         pagerank_alpha=pagerank_alpha
     )
-    st.plotly_chart(fig, use_container_width=True)
+    combined_lasso_params = {
+        **combined_lasso_generation_params,
+        "centrality": centrality_choice,
+        "pagerank_alpha": float(pagerank_alpha) if centrality_choice == "pagerank" else None,
+    }
+    _plotly_chart_with_download(
+        fig,
+        base_name="combined_lasso_graph",
+        button_label="Download combined Lasso visualization + parameters",
+        key="download_combined_lasso_plot",
+        params=combined_lasso_params,
+    )
     
     with st.expander("Show top centrality"):
         if graph.number_of_nodes() == 0:
@@ -1286,7 +1425,8 @@ def show_diffusion_simulator_page():
             threshold = st.slider("Edge threshold", 0.0, 1.0, 0.15, 0.01, key="diffusion_threshold")
     
     with col4:
-        max_nodes = st.slider("Max nodes", 50, 1200, 300, 50, key="diffusion_max_nodes")
+        max_nodes = st.slider("Max nodes", 50, 3000, 300, 50, key="diffusion_max_nodes")
+    _show_rendered_node_selection_explanation(include_forced_nodes=False)
     
     # Edge function selection for multigraph/shadow networks
     if graph_topology in ["Multi-layer", "Shadow multigraph"]:
@@ -1531,25 +1671,29 @@ def show_diffusion_simulator_page():
         start_node = st.selectbox("Start node", sorted(graph.nodes()), key="diffusion_start")
 
     selected_dataset_name = selected_dataset.name if "selected_dataset" in locals() else None
+    diffusion_graph_generation_params = {
+        "method": method,
+        "graph_topology": graph_topology,
+        "dataset": selected_dataset_name,
+        "selected_datasets": selected_datasets,
+        "lasso_scope": lasso_scope if method == "lasso_linear_regression" else None,
+        "lasso_alpha": float(lasso_alpha) if method == "lasso_linear_regression" else None,
+        "lasso_combined_sources": lasso_combined_sources if method == "lasso_linear_regression" and lasso_scope == "All datasets (combined)" else None,
+        "n_power": int(n_power),
+        "sigma": float(sigma),
+        "threshold": float(threshold),
+        "max_nodes": int(max_nodes),
+        "alpha": float(alpha) if graph_topology in ["Multi-layer", "Shadow multigraph"] else None,
+        "gamma": float(gamma) if graph_topology == "Shadow multigraph" else None,
+        "edge_fn_intra": edge_fn_intra_name,
+        "edge_fn_inter": edge_fn_inter_name,
+        "edge_fn_negative": edge_fn_negative_name,
+    }
+    _show_graph_hyperparameters("Graph generation hyperparameters", diffusion_graph_generation_params)
+
     diffusion_params = {
         "page": "Diffusion Simulator",
-        "graph": {
-            "method": method,
-            "graph_topology": graph_topology,
-            "dataset": selected_dataset_name,
-            "selected_datasets": selected_datasets,
-            "lasso_scope": lasso_scope if method == "lasso_linear_regression" else None,
-            "lasso_alpha": float(lasso_alpha) if method == "lasso_linear_regression" else None,
-            "n_power": int(n_power),
-            "sigma": float(sigma),
-            "threshold": float(threshold),
-            "max_nodes": int(max_nodes),
-            "alpha": float(alpha) if graph_topology in ["Multi-layer", "Shadow multigraph"] else None,
-            "gamma": float(gamma) if graph_topology == "Shadow multigraph" else None,
-            "edge_fn_intra": edge_fn_intra_name,
-            "edge_fn_inter": edge_fn_inter_name,
-            "edge_fn_negative": edge_fn_negative_name,
-        },
+        "graph": diffusion_graph_generation_params,
         "diffusion": {
             "restart_prob": float(restart_prob),
             "n_walks": int(n_walks),
@@ -1563,102 +1707,16 @@ def show_diffusion_simulator_page():
     if st.button("Run Random Walk Simulation", key="run_diffusion"):
         try:
             with st.spinner("Running random walk simulation..."):
-                # Convert graph to adjacency for RWR
-                adj_matrix = nx.to_pandas_adjacency(graph)
-                
-                # Create transition matrix
-                if method == "lasso_linear_regression":
-                    # For Lasso: use uniform probabilities (1/out_degree) regardless of edge weights
-                    # This treats the graph as unweighted topology
-                    transition_matrix = adj_matrix.copy()
-                    for row_idx in transition_matrix.index:
-                        out_degree = (transition_matrix.loc[row_idx] > 0).sum()
-                        if out_degree > 0:
-                            transition_matrix.loc[row_idx] = (transition_matrix.loc[row_idx] > 0).astype(float) / out_degree
-                else:
-                    # For correlation methods: weight by edge strength
-                    row_sums = adj_matrix.sum(axis=1)
-                    row_sums[row_sums == 0] = 1  # Avoid division by zero
-                    transition_matrix = adj_matrix.div(row_sums, axis=0).fillna(0)
-                
-                # Use Numba-optimized random walk if available, otherwise fallback
-                try:
-                    from numba import jit
-                    
-                    @jit(nopython=True)
-                    def numba_random_walks(transition_probs, start_idx, n_walks, max_steps, restart_prob):
-                        """JIT-compiled random walk simulation"""
-                        n_nodes = transition_probs.shape[0]
-                        visit_counts = np.zeros(n_nodes)
-                        
-                        for walk in range(n_walks):
-                            current_idx = start_idx
-                            for step in range(max_steps):
-                                visit_counts[current_idx] += 1
-                                
-                                if np.random.random() < restart_prob:
-                                    current_idx = start_idx
-                                else:
-                                    # Get neighbors
-                                    neighbors = transition_probs[current_idx]
-                                    has_neighbors = False
-                                    for i in range(len(neighbors)):
-                                        if neighbors[i] > 0:
-                                            has_neighbors = True
-                                            break
-                                    
-                                    if has_neighbors:
-                                        # Multinomial sampling
-                                        cumsum = np.cumsum(neighbors)
-                                        r = np.random.random()
-                                        for i in range(len(cumsum)):
-                                            if r < cumsum[i]:
-                                                current_idx = i
-                                                break
-                                    else:
-                                        current_idx = start_idx
-                        
-                        return visit_counts
-                    
-                    # Convert to numpy for Numba
-                    node_list = list(graph.nodes())
-                    node_to_idx = {node: idx for idx, node in enumerate(node_list)}
-                    start_idx = node_to_idx[start_node]
-                    
-                    trans_matrix_np = transition_matrix.values.astype(np.float64)
-                    
-                    st.info("Using Numba JIT-compiled random walks (much faster!)")
-                    visit_counts = numba_random_walks(trans_matrix_np, start_idx, int(n_walks), int(max_steps), float(restart_prob))
-                    
-                except (ImportError, Exception) as e:
-                    # Fallback to pure Python if Numba fails
-                    st.warning(f"Numba not available, using Python implementation: {str(e)[:50]}")
-                    
-                    # Simple random walk simulation (original code)
-                    node_list = list(graph.nodes())
-                    node_to_idx = {node: idx for idx, node in enumerate(node_list)}
-                    start_idx = node_to_idx[start_node]
-                    
-                    visit_counts = np.zeros(len(node_list))
-                    
-                    for _ in range(int(n_walks)):
-                        current_idx = start_idx
-                        for _ in range(int(max_steps)):
-                            visit_counts[current_idx] += 1
-                            
-                            # Restart with probability
-                            if np.random.random() < restart_prob:
-                                current_idx = start_idx
-                            else:
-                                # Random walk step
-                                neighbors = transition_matrix.iloc[current_idx]
-                                if neighbors.sum() > 0:
-                                    current_idx = np.random.choice(len(node_list), p=neighbors.values)
-                                else:
-                                    current_idx = start_idx
-                
-                # Normalize visit counts
-                visit_counts = visit_counts / visit_counts.sum()
+                node_list, visit_counts, simulation_backend = simulate_diffusion_visits(
+                    graph=graph,
+                    start_node=start_node,
+                    n_walks=int(n_walks),
+                    max_steps=int(max_steps),
+                    restart_prob=float(restart_prob),
+                    use_unweighted_transition=(method == "lasso_linear_regression"),
+                    prefer_numba=True,
+                )
+                st.info(simulation_backend)
                 
                 # Display results
                 st.success("Simulation completed!")
@@ -1999,8 +2057,8 @@ def show_start_to_end_page():
         use_fast_rwr = st.checkbox("USE_FAST_RWR", value=bool(start_to_end_module.USE_FAST_RWR), key="s2e_use_fast")
         use_shadow_network = st.checkbox("USE_SHADOW_NETWORK", value=bool(start_to_end_module.USE_SHADOW_NETWORK), key="s2e_use_shadow")
         fix_transition_prob = st.checkbox("fix_transition_prob", value=bool(start_to_end_module.fix_transition_prob), key="s2e_fix_transition")
-        gamma = st.slider("gamma", 0.0, 1.0, float(start_to_end_module.gamma), 0.01, key="s2e_gamma")
-        alpha = st.slider("alpha", 0.0, 1.0, float(start_to_end_module.alpha), 0.0001, key="s2e_alpha")
+        gamma = st.slider("gamma", 0.0, 1.0, float(start_to_end_module.gamma), 0.001, format="%.3f", key="s2e_gamma")
+        alpha = st.slider("alpha", 0.0, 1.0, float(start_to_end_module.alpha), 0.001, format="%.3f", key="s2e_alpha")
 
     with c2:
         restart_prob = st.slider("restart_prob", 0.0, 1.0, float(start_to_end_module.restart_prob), 0.01, key="s2e_restart")
@@ -2062,6 +2120,22 @@ def show_start_to_end_page():
         sigma_s2e = st.slider("sigma (edge weights)", 0.001, 1.0, 0.05, 0.001, key="s2e_sigma",
             help="Temperature parameter for exponential/gaussian edge weights")
 
+    s2e_graph_topology = "shadow_multigraph" if use_shadow_network else ("multigraph_with_layer_transitions" if fix_transition_prob else "multigraph")
+    s2e_graph_generation_params = {
+        "graph_topology": s2e_graph_topology,
+        "edge_fn_intra": edge_fn_intra_name,
+        "edge_fn_inter": edge_fn_inter_name,
+        "edge_fn_negative": edge_fn_negative_name,
+        "n_power": int(n_power_s2e),
+        "sigma": float(sigma_s2e),
+        "gamma": float(gamma),
+        "alpha": float(alpha),
+        "start": start_node,
+        "end": end_node,
+        "folder_path": folder_path,
+    }
+    _show_graph_hyperparameters("Graph generation hyperparameters", s2e_graph_generation_params)
+
     s2e_params = {
         "page": "Start-to-End Pipeline",
         "flags": {
@@ -2069,15 +2143,7 @@ def show_start_to_end_page():
             "USE_SHADOW_NETWORK": bool(use_shadow_network),
             "fix_transition_prob": bool(fix_transition_prob),
         },
-        "graph": {
-            "edge_fn_intra": edge_fn_intra_name,
-            "edge_fn_inter": edge_fn_inter_name,
-            "edge_fn_negative": edge_fn_negative_name,
-            "n_power": int(n_power_s2e),
-            "sigma": float(sigma_s2e),
-            "gamma": float(gamma),
-            "alpha": float(alpha),
-        },
+        "graph": s2e_graph_generation_params,
         "diffusion": {
             "restart_prob": float(restart_prob),
             "n_simulations": int(n_simulations),
@@ -2166,7 +2232,6 @@ def show_histone_cluster_analysis_page():
         restart_prob = st.slider("restart_prob", 0.0, 1.0, float(histone_module.restart_prob), 0.01, key="hist_restart")
         n_simulations = st.number_input("n_simulations", min_value=1, max_value=200000, value=int(histone_module.n_simulations), step=100, key="hist_n_sims")
         n_genes = st.number_input("n_genes", min_value=1, max_value=1000, value=int(histone_module.n_genes), step=5, key="hist_n_genes")
-        start_node = st.text_input("start", value=str(histone_module.start), key="hist_start")
         end_node = st.text_input("end", value=str(histone_module.end), key="hist_end")
 
     with c3:
@@ -2212,6 +2277,38 @@ def show_histone_cluster_analysis_page():
             index=edge_negative_options.index(current_negative) if current_negative in edge_negative_options else 0,
             key="hist_edge_negative",
         )
+
+    histone_dataset_options = _discover_histone_dataset_options(folder_path)
+    default_histone_dataset = str(getattr(histone_module, "histone_dataset_filter", "k20me3")).lower()
+    if histone_dataset_options:
+        default_histone_index = histone_dataset_options.index(default_histone_dataset) if default_histone_dataset in histone_dataset_options else 0
+        selected_histone_dataset = st.selectbox(
+            "Histone dataset",
+            options=histone_dataset_options,
+            index=default_histone_index,
+            key="hist_dataset_selector",
+        )
+    else:
+        selected_histone_dataset = st.text_input(
+            "Histone dataset",
+            value=default_histone_dataset,
+            key="hist_dataset_selector",
+            help="Token used to select histone files (e.g. k20me3, k27me3, k9me2).",
+        )
+
+    start_node_candidates = _discover_histone_start_nodes(folder_path, selected_histone_dataset)
+    if start_node_candidates:
+        current_start = str(histone_module.start)
+        default_start_idx = start_node_candidates.index(current_start) if current_start in start_node_candidates else 0
+        start_node = st.selectbox(
+            "start",
+            options=start_node_candidates,
+            index=default_start_idx,
+            key="hist_start",
+            help="Start nodes are genes from the selected histone dataset.",
+        )
+    else:
+        start_node = st.text_input("start", value=str(histone_module.start), key="hist_start")
     
     st.write("**Edge weight parameters:**")
     c1, c2 = st.columns(2)
@@ -2222,6 +2319,23 @@ def show_histone_cluster_analysis_page():
         sigma_hist = st.slider("sigma (edge weights)", 0.001, 1.0, 0.05, 0.001, key="hist_sigma",
             help="Temperature parameter for exponential/gaussian edge weights")
 
+    hist_graph_topology = "shadow_multigraph" if use_shadow_network else ("multigraph_with_layer_transitions" if fix_transition_prob else "multigraph")
+    hist_graph_generation_params = {
+        "graph_topology": hist_graph_topology,
+        "histone_dataset": selected_histone_dataset,
+        "edge_fn_intra": edge_fn_intra_name,
+        "edge_fn_inter": edge_fn_inter_name,
+        "edge_fn_negative": edge_fn_negative_name,
+        "n_power": int(n_power_hist),
+        "sigma": float(sigma_hist),
+        "gamma": float(gamma),
+        "alpha": float(alpha),
+        "start": start_node,
+        "end": end_node,
+        "folder_path": folder_path,
+    }
+    _show_graph_hyperparameters("Graph generation hyperparameters", hist_graph_generation_params)
+
     hist_params = {
         "page": "Histone Cluster Analysis",
         "flags": {
@@ -2229,15 +2343,7 @@ def show_histone_cluster_analysis_page():
             "USE_SHADOW_NETWORK": bool(use_shadow_network),
             "fix_transition_prob": bool(fix_transition_prob),
         },
-        "graph": {
-            "edge_fn_intra": edge_fn_intra_name,
-            "edge_fn_inter": edge_fn_inter_name,
-            "edge_fn_negative": edge_fn_negative_name,
-            "n_power": int(n_power_hist),
-            "sigma": float(sigma_hist),
-            "gamma": float(gamma),
-            "alpha": float(alpha),
-        },
+        "graph": hist_graph_generation_params,
         "diffusion": {
             "restart_prob": float(restart_prob),
             "n_simulations": int(n_simulations),
@@ -2266,6 +2372,7 @@ def show_histone_cluster_analysis_page():
             histone_module.start = start_node
             histone_module.end = end_node
             histone_module.folder_path = folder_path
+            histone_module.histone_dataset_filter = selected_histone_dataset
             histone_module.edge_fn_intra = getattr(histone_module, edge_fn_intra_name)
             histone_module.edge_fn_inter = getattr(histone_module, edge_fn_inter_name)
             histone_module.edge_fn_negative = getattr(histone_module, edge_fn_negative_name)
@@ -2427,6 +2534,11 @@ def show_graph_clustering_nmi_page():
             index=0,
             key="cluster_nmi_assign_labels",
         )
+    if assign_labels == "discretize":
+        st.info(
+            "`discretize` means spectral embedding vectors are converted into hard cluster labels by "
+            "discretizing (rotating/thresholding) the continuous embedding, rather than running k-means on it."
+        )
     with c3:
         symmetrize = st.selectbox(
             "symmetrize",
@@ -2565,7 +2677,7 @@ def show_graph_clustering_nmi_page():
                 max_nodes = st.slider(
                     "Max nodes",
                     min_value=50,
-                    max_value=2000,
+                    max_value=3000,
                     value=300,
                     step=50,
                     key=f"cluster_nmi_max_nodes_{graph_type}",
@@ -2656,6 +2768,26 @@ def show_graph_clustering_nmi_page():
                 "multigraph_inter_sigma": float(multigraph_inter_sigma),
                 "multigraph_inter_threshold": float(multigraph_inter_threshold),
             }
+
+    _show_rendered_node_selection_explanation(include_forced_nodes=False)
+    clustering_generation_params = {
+        "page": "Multi-Graph Clustering + NMI",
+        "global": {
+            "n_clusters": int(n_clusters),
+            "assign_labels": assign_labels,
+            "symmetrize": symmetrize,
+            "nmi_method": nmi_method,
+            "clip_negative": bool(clip_negative),
+            "remove_isolated": bool(remove_isolated),
+            "add_self_loops": bool(add_self_loops),
+            "min_common_nodes": int(min_common_nodes),
+            "input_mode": input_mode,
+            "selected_dataset": str(selected_dataset) if selected_dataset is not None else None,
+            "selected_multigraph_dataset_names": selected_multigraph_dataset_names,
+        },
+        "per_graph": graph_params,
+    }
+    _show_graph_hyperparameters("Graph generation hyperparameters", clustering_generation_params)
 
     if st.button("Generate graphs, cluster, and compute MI", key="run_cluster_nmi"):
         generated_graphs: dict[str, pd.DataFrame] = {}
@@ -2832,6 +2964,7 @@ def show_graph_clustering_nmi_page():
             st.success("Graph generation and spectral clustering completed.")
             st.subheader("Generated graph summary")
             st.dataframe(pd.DataFrame(graph_build_log), use_container_width=True)
+            graph_log_lookup = {entry["graph"]: entry for entry in graph_build_log}
 
             st.subheader("Clustered graph visualizations")
             for graph_name, result in clustering_results.items():
@@ -2842,7 +2975,31 @@ def show_graph_clustering_nmi_page():
                     labels_df=labels_df,
                     title=f"{graph_name} | Spectral clusters",
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                graph_slug = _slugify_label(graph_name)
+                graph_summary = graph_log_lookup.get(graph_name, {})
+                cluster_plot_params = {
+                    "page": "Multi-Graph Clustering + NMI",
+                    "graph_name": graph_name,
+                    "graph_summary": graph_summary,
+                    "n_clusters": int(n_clusters),
+                    "assign_labels": assign_labels,
+                    "symmetrize": symmetrize,
+                    "clip_negative": bool(clip_negative),
+                    "remove_isolated": bool(remove_isolated),
+                    "add_self_loops": bool(add_self_loops),
+                    "min_common_nodes": int(min_common_nodes),
+                }
+                cluster_csv = {
+                    f"{graph_slug}_clusters": labels_df.reset_index().rename(columns={"index": "node"})
+                }
+                _plotly_chart_with_download(
+                    fig,
+                    base_name=f"{graph_slug}_spectral_clusters",
+                    button_label=f"Download {graph_name} clusters + parameters",
+                    key=f"download_cluster_plot_{graph_slug}",
+                    params=cluster_plot_params,
+                    csv_frames=cluster_csv,
+                )
                 st.dataframe(labels_df.head(100), use_container_width=True)
 
             graph_names = list(clustering_results.keys())
@@ -2882,7 +3039,20 @@ def show_graph_clustering_nmi_page():
                     title=f"Pairwise {nmi_method.upper()} between graph clusterings",
                 )
                 fig_mi.update_layout(height=500)
-                st.plotly_chart(fig_mi, use_container_width=True)
+                mi_params = {
+                    "page": "Multi-Graph Clustering + NMI",
+                    "method": nmi_method,
+                    "min_common_nodes": int(min_common_nodes),
+                    "graph_names": graph_names,
+                }
+                _plotly_chart_with_download(
+                    fig_mi,
+                    base_name="clustering_mi_matrix",
+                    button_label=f"Download {nmi_method.upper()} heatmap + parameters",
+                    key="download_cluster_mi_heatmap",
+                    params=mi_params,
+                    csv_frames={"mi_table": mi_table},
+                )
                 st.dataframe(mi_table, use_container_width=True)
             else:
                 st.info("At least two successfully clustered graphs are required to compute mutual information.")

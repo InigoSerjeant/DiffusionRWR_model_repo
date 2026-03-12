@@ -8,6 +8,7 @@ This script runs cluster analysis on the combined RNA + histone marks
 import numpy as np
 import pandas as pd
 import os
+import re
 from pathlib import Path
 import sys
 from sklearn.decomposition import PCA
@@ -22,13 +23,51 @@ from ..graph_generation.generate_graph_internal import lasso_single_graph
 from ..run_RWR.numba_RWR import simulate_walks_to_rna_FAST
 
 # Configuration
-DATA_FOLDER = r"C:\Users\inigo\OneDrive\Documents\Fourth_Year\Computations\Dissertation\DiffusionRWR_model_repo\DiffusionRWR_model_package\data\Modelled"
+DATA_FOLDER = str(Path(__file__).resolve().parents[1] / "data" / "Modelled")
 LASSO_ALPHA = 0.01
 N_CLUSTERS = 5  # Number of clusters for spectral clustering
 N_SIMULATIONS = 10000  # Number of random walk simulations
 RESTART_PROB = 0.05  # Probability of restart during RWR
 START_NODE = 'e3'  # Start from the dominant temporal anchor
 N_TOP_GENES = 100  # Number of top genes to report
+
+
+def _discover_sources() -> dict[str, tuple[Path, str]]:
+    data_path = Path(DATA_FOLDER)
+    pattern = re.compile(r"^overlap_filtered_(.+)_m_v2\.csv$", re.IGNORECASE)
+    source_map: dict[str, tuple[Path, str]] = {}
+
+    for file_path in sorted(data_path.glob("overlap_filtered_*_m_v2.csv")):
+        match = pattern.match(file_path.name)
+        if not match:
+            continue
+
+        token = match.group(1)
+        if token.lower().startswith("rna"):
+            label = "RNA"
+            suffix = "RNA"
+        else:
+            suffix = token[:1].upper() + token[1:]
+            label = suffix
+
+        if label in source_map:
+            source_map[f"{label} ({file_path.stem})"] = (file_path, suffix)
+        else:
+            source_map[label] = (file_path, suffix)
+
+    return source_map
+
+
+def _node_type(node_name: str) -> str:
+    if node_name.startswith('e'):
+        return 'basis'
+    upper = node_name.upper()
+    if upper.endswith('_RNA'):
+        return 'RNA'
+    suffix = upper.rsplit('_', 1)[-1] if '_' in upper else ''
+    if suffix.startswith('K') and 'ME' in suffix:
+        return suffix
+    return 'other'
 
 def run_combined_cluster_analysis():
     """
@@ -40,21 +79,18 @@ def run_combined_cluster_analysis():
     
     # Step 1: Load and combine data
     print("\n[STEP 1] Loading combined data...")
-    rna_df = pd.read_csv(os.path.join(DATA_FOLDER, 'overlap_filtered_rna_ai_m_v2.csv'), index_col=0)
-    k20me3_df = pd.read_csv(os.path.join(DATA_FOLDER, 'overlap_filtered_k20me3_m_v2.csv'), index_col=0)
-    k9me2_df = pd.read_csv(os.path.join(DATA_FOLDER, 'overlap_filtered_k9me2_m_v2.csv'), index_col=0)
-    
-    print(f"  RNA: {rna_df.shape}")
-    print(f"  K20me3: {k20me3_df.shape}")
-    print(f"  K9me2: {k9me2_df.shape}")
-    
-    # Rename indices to indicate data type
-    rna_df.index = [f"{g}_RNA" for g in rna_df.index]
-    k20me3_df.index = [f"{g}_K20me3" for g in k20me3_df.index]
-    k9me2_df.index = [f"{g}_K9me2" for g in k9me2_df.index]
-    
-    # Combine datasets
-    combined_df = pd.concat([rna_df, k20me3_df, k9me2_df])
+    sources = _discover_sources()
+    if 'RNA' not in sources:
+        raise ValueError("No RNA overlap dataset found (expected overlap_filtered_rna*_m_v2.csv)")
+
+    source_frames = []
+    for label, (file_path, suffix) in sources.items():
+        frame = pd.read_csv(file_path, index_col=0)
+        print(f"  {label}: {frame.shape}")
+        frame.index = [f"{g}_{suffix}" for g in frame.index]
+        source_frames.append(frame)
+
+    combined_df = pd.concat(source_frames)
     print(f"  Combined shape before filtering: {combined_df.shape}")
     
     # Filter to only integer time points (0, 1, 2, 3, 4)
@@ -188,13 +224,17 @@ def run_combined_cluster_analysis():
             
             # Get composition by type
             members = cluster_members[label]
-            rna_count = sum(1 for m in members if '_RNA' in m)
-            k20me3_count = sum(1 for m in members if '_K20me3' in m)
-            k9me2_count = sum(1 for m in members if '_K9me2' in m)
+            type_counts = {}
+            for member in members:
+                member_type = _node_type(member)
+                if member_type == 'basis':
+                    continue
+                type_counts[member_type] = type_counts.get(member_type, 0) + 1
             basis_count = sum(1 for m in members if m.startswith('e'))
             
             print(f"\nCluster {label}: {size} nodes ({percentage:.1f}%)")
-            print(f"  Composition: {rna_count} RNA, {k20me3_count} K20me3, {k9me2_count} K9me2, {basis_count} basis vectors")
+            composition = ", ".join([f"{count} {name}" for name, count in sorted(type_counts.items())])
+            print(f"  Composition: {composition}, {basis_count} basis vectors")
             print(f"  Sample members: {', '.join(members[:5])}")
         
         # Export cluster assignments
@@ -230,12 +270,14 @@ def run_combined_cluster_analysis():
         colors = []
         hover_texts = []
         
-        color_map = {
-            'RNA': 'blue',
-            'K20me3': 'red',
-            'K9me2': 'green',
-            'basis': 'gold'
-        }
+        unique_histone_types = sorted({
+            _node_type(node) for node in adjacency.index
+            if _node_type(node) not in {'RNA', 'basis', 'other'}
+        })
+        palette = ['red', 'green', 'purple', 'orange', 'brown', 'teal', 'magenta']
+        color_map = {'RNA': 'blue', 'basis': 'gold', 'other': 'gray'}
+        for i, h_type in enumerate(unique_histone_types):
+            color_map[h_type] = palette[i % len(palette)]
         
         for i, node in enumerate(adjacency.index):
             hover_texts.append(f"{node}<br>Cluster: {cluster_labels[i] if cluster_labels is not None else 'N/A'}")
@@ -246,12 +288,10 @@ def run_combined_cluster_analysis():
             elif '_RNA' in node:
                 node_types.append('RNA')
                 colors.append(color_map['RNA'])
-            elif '_K20me3' in node:
-                node_types.append('K20me3')
-                colors.append(color_map['K20me3'])
-            elif '_K9me2' in node:
-                node_types.append('K9me2')
-                colors.append(color_map['K9me2'])
+            else:
+                histone_type = _node_type(node)
+                node_types.append(histone_type)
+                colors.append(color_map.get(histone_type, color_map['other']))
                 
         
         fig = go.Figure(data=[go.Scatter3d(
