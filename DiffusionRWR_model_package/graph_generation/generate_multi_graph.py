@@ -409,7 +409,7 @@ def create_shadow_network_multigraph(
     edge_fn_inter : function
         Function for inter-layer edge weights
     gamma : float
-        Probability of negative correlation jumps (0 <= gamma <= 1)
+        Deprecated. Kept for backward compatibility and ignored.
     alpha : float
         Probability of transitioning to a different layer at each step (0 <= alpha <= 1)
     start, end : str
@@ -419,277 +419,75 @@ def create_shadow_network_multigraph(
     --------
     pd.DataFrame : Complete adjacency matrix with regular + shadow nodes
     """
-    
-    if not 0 <= gamma <= 1:
-        raise ValueError(f"gamma must be between 0 and 1, got {gamma}")
+
     if not 0 <= alpha <= 1:
         raise ValueError(f"alpha must be between 0 and 1, got {alpha}")
-    
+
     print("=" * 80)
-    print("CREATING SHADOW NETWORK (OPTIMIZED WITH SIGN MATRICES)")
+    print("CREATING SHADOW NETWORK (BLOCKWISE CONSTRUCTION)")
     print("=" * 80)
-    print(f"Gamma (negative jump probability): {gamma}")
-    print(f"Regular space probability: {1 - gamma}")
+    print("Building normalized regular multigraph, then applying sign masks blockwise")
+    if gamma is not None:
+        print(f"Note: gamma={gamma} is ignored in dynamic-shadow mode")
     print(f"Alpha (inter-layer transition probability): {alpha}")
     print(f"Intra-layer probability: {1 - alpha}")
-    
-    dataset_names = list(std_data_dict.keys())
+
     basis_names = ['e1', 'e2', 'e3', 'e4', 'e5']
-    
-    # Step 1: Build node lists
-    print("\n[STEP 1] Building node lists...")
-    regular_nodes = []
-    basis_nodes_seen = set()
-    
-    for name, adj_df in intra_graphs.items():
-        for idx in adj_df.index:
-            if idx in basis_names:
-                # Basis vectors are shared across layers (not labeled)
-                basis_nodes_seen.add(idx)
-            else:
-                # Regular genes get labeled by layer
-                regular_nodes.append(f"{idx}_{name}")
-    
-    # Add basis vectors to regular nodes
-    regular_nodes = list(basis_nodes_seen) + regular_nodes
-    
-    # Shadow nodes (exclude basis vectors)
-    shadow_nodes = [node + "_neg" for node in regular_nodes 
-                    if node not in basis_names]
-    
+
+    print("\n[STEP 1] Building normalized regular multigraph...")
+    regular_adj = create_multigraph_with_layer_transitions(
+        std_data_dict=std_data_dict,
+        intra_layer_graphs=intra_graphs,
+        edge_fn_inter=edge_fn_inter,
+        alpha=alpha,
+        start=start,
+        end=end,
+    )
+
+    print("\n[STEP 2] Building sign graph and masks...")
+
+    def _raw_corr(x, y):
+        corr = np.corrcoef(x, y)[0, 1]
+        return 0.0 if np.isnan(corr) else corr
+
+    signed_intra_graphs = {}
+    for layer_name, adj_df in intra_graphs.items():
+        layer_signs = sign_matrices[layer_name].reindex(index=adj_df.index, columns=adj_df.columns).fillna(0.0)
+        signed_intra_graphs[layer_name] = adj_df * layer_signs
+
+    sign_adj = create_multigraph(
+        std_data_dict=std_data_dict,
+        intra_layer_graphs=signed_intra_graphs,
+        edge_fn_inter=_raw_corr,
+        start=start,
+        end=end,
+    )
+    sign_adj = np.sign(sign_adj).reindex(index=regular_adj.index, columns=regular_adj.columns).fillna(0.0)
+
+    pos_adj = regular_adj.where(sign_adj > 0, 0.0)
+    neg_adj = regular_adj.where(sign_adj < 0, 0.0)
+
+    regular_nodes = regular_adj.index.tolist()
+    non_basis_nodes = [node for node in regular_nodes if node not in basis_names]
+    shadow_nodes = [f"{node}_neg" for node in non_basis_nodes]
     all_nodes = regular_nodes + shadow_nodes
-    
-    print(f"  Basis vectors: {len(basis_nodes_seen)}")
-    print(f"  Regular gene nodes: {len(regular_nodes) - len(basis_nodes_seen)}")
-    print(f"  Shadow nodes: {len(shadow_nodes)}")
-    print(f"  Total nodes: {len(all_nodes)}")
-    
-    # Step 2: Initialize adjacency matrix
-    print("\n[STEP 2] Initializing adjacency matrix...")
+
+    print("\n[STEP 3] Assembling blockwise shadow adjacency...")
     complete_adj = pd.DataFrame(0.0, index=all_nodes, columns=all_nodes)
-    print(f"  Matrix size: {len(all_nodes)} x {len(all_nodes)}")
-    
-    # Step 3: Fill intra-layer edges using sign matrices (VECTORIZED)
-    print("\n[STEP 3] Adding intra-layer edges (vectorized)...")
-    total_edges = 0
-    
-    for layer_idx, (name, adj_df) in enumerate(intra_graphs.items()):
-        print(f"  Processing layer {layer_idx+1}/{len(intra_graphs)}: {name}...")
-        sign_matrix = sign_matrices[name]
-        
-        # Get node labels
-        node_labels = {node: f"{node}_{name}" if node not in basis_names else node 
-                       for node in adj_df.index}
-        shadow_labels = {node: f"{node}_{name}_neg" 
-                        for node in adj_df.index if node not in basis_names}
-        
-        # Create positive and negative masks
-        pos_mask = (sign_matrix > 0).values
-        neg_mask = (sign_matrix < 0).values
-        
-        # Extract weights
-        weights = adj_df.values
-        
-        # CRITICAL: Normalize BEFORE scaling by probability factors
-        # For each row, we need: sum(positive edges) = 1-gamma, sum(negative edges) = gamma
-        # Step 1: Separate positive and negative weights
-        pos_weights_raw = weights * pos_mask
-        neg_weights_raw = weights * neg_mask
-        
-        # Step 2: Normalize within each category (row-wise)
-        # Positive edges: normalize to 1, then scale to (1-gamma)
-        pos_row_sums = pos_weights_raw.sum(axis=1, keepdims=True)
-        pos_row_sums[pos_row_sums == 0] = 1  # Avoid division by zero
-        pos_weights_normalized = pos_weights_raw / pos_row_sums
-        pos_weights = pos_weights_normalized * (1 - gamma)
-        
-        # Negative edges: normalize to 1, then scale to gamma
-        neg_row_sums = neg_weights_raw.sum(axis=1, keepdims=True)
-        neg_row_sums[neg_row_sums == 0] = 1  # Avoid division by zero
-        neg_weights_normalized = neg_weights_raw / neg_row_sums
-        neg_weights = neg_weights_normalized * gamma
-        
-        # Map indices to labeled nodes
-        regular_idx = [node_labels[node] for node in adj_df.index]
-        shadow_idx = [shadow_labels.get(node, None) for node in adj_df.index]
-        
-        # Type 1: Regular → Regular (positive correlations, 1-γ)
-        complete_adj.loc[regular_idx, regular_idx] = pos_weights
-        pos_edges = (pos_weights > 0).sum()
-        
-        # Type 2: Regular → Shadow (negative correlations, γ)
-        # Only assign for non-basis nodes
-        non_basis_mask = np.array([node not in basis_names for node in adj_df.index])
-        shadow_row_idx = [node_labels[node] for node in adj_df.index]
-        shadow_col_idx = [shadow_labels[node] for node in adj_df.index if node not in basis_names]
-        
-        # Extract sub-matrix for non-basis nodes
-        neg_weights_sub = neg_weights[:, non_basis_mask]
-        complete_adj.loc[shadow_row_idx, shadow_col_idx] = neg_weights_sub
-        neg_entry_edges = (neg_weights_sub > 0).sum()
-        
-        # Type 3: Shadow → Shadow (positive correlations in shadow, 1-γ)
-        non_basis_regular_idx = [node_labels[node] for node in adj_df.index if node not in basis_names]
-        non_basis_shadow_idx = shadow_col_idx
-        pos_weights_shadow = pos_weights[non_basis_mask, :][:, non_basis_mask] 
-        complete_adj.loc[non_basis_shadow_idx, non_basis_shadow_idx] = pos_weights_shadow
-        shadow_pos_edges = (pos_weights_shadow > 0).sum()
-        
-        # Type 4: Shadow → Regular (negative correlations, γ)
-        neg_weights_exit = neg_weights[non_basis_mask, :][:, non_basis_mask]
-        complete_adj.loc[non_basis_shadow_idx, non_basis_regular_idx] = neg_weights_exit
-        neg_exit_edges = (neg_weights_exit > 0).sum()
-        
-        layer_edges = pos_edges + neg_entry_edges + shadow_pos_edges + neg_exit_edges
-        print(f"    {name}: {layer_edges} edges (pos:{pos_edges}, neg_entry:{neg_entry_edges}, "
-              f"shadow:{shadow_pos_edges}, neg_exit:{neg_exit_edges})")
-        total_edges += layer_edges
-    
-    print(f"  Total intra-layer edges: {total_edges}")
-    
-    # Step 4: Inter-layer connections (vectorized)
-    print("\n[STEP 4] Adding inter-layer connections (vectorized, both directions)...")
-    inter_count = 0
-    total_pairs = len(dataset_names) * (len(dataset_names) - 1)  # Both directions
-    pair_idx = 0
-    
-    for name_A in dataset_names:
-        for name_B in dataset_names:
-            if name_A == name_B:
-                continue  # Skip same-layer connections
-            
-            pair_idx += 1
-            print(f"  Processing pair {pair_idx}/{total_pairs}: {name_A} -> {name_B}...")
-            
-            # Generate inter-layer connections from A to B (absolute values)
-            section_AB_abs = create_connected_sections(
-                std_data_dict[name_A],
-                std_data_dict[name_B],
-                label_A=f'_{name_A}',
-                label_B=f'_{name_B}',
-                edge_fn=edge_fn_inter,
-                same_gene=True,
-                return_sign_matrix=False
-            )
-            
-            # Generate sign matrix for inter-layer connections
-            section_AB_signs = create_connected_sections(
-                std_data_dict[name_A],
-                std_data_dict[name_B],
-                label_A=f'_{name_A}',
-                label_B=f'_{name_B}',
-                edge_fn=edge_fn_inter,
-                same_gene=True,
-                return_sign_matrix=True
-            )
-            
-            # Separate positive and negative edges
-            pos_mask = (section_AB_signs > 0).values
-            neg_mask = (section_AB_signs < 0).values
-            weights = section_AB_abs.values
-            
-            # Separate positive and negative weights
-            pos_weights_raw = weights * pos_mask
-            neg_weights_raw = weights * neg_mask
-            
-            # Normalize within each category (row-wise)
-            # Inter-layer edges should vanish when alpha=0.
-            # Therefore both positive and negative inter-layer components are scaled by alpha.
-            # Positive edges: normalize to 1, then scale to alpha
-            pos_row_sums = pos_weights_raw.sum(axis=1, keepdims=True)
-            pos_row_sums[pos_row_sums == 0] = 1  # Avoid division by zero
-            pos_weights_normalized = pos_weights_raw / pos_row_sums
-            pos_weights_scaled = pos_weights_normalized * alpha
-            
-            # Negative edges: normalize to 1, then scale to alpha
-            neg_row_sums = neg_weights_raw.sum(axis=1, keepdims=True)
-            neg_row_sums[neg_row_sums == 0] = 1  # Avoid division by zero
-            neg_weights_normalized = neg_weights_raw / neg_row_sums
-            neg_weights_scaled = neg_weights_normalized * alpha
-            
-            # Convert back to DataFrames
-            section_AB_pos = pd.DataFrame(pos_weights_scaled, 
-                                          index=section_AB_abs.index, 
-                                          columns=section_AB_abs.columns)
-            section_AB_neg = pd.DataFrame(neg_weights_scaled,
-                                          index=section_AB_abs.index,
-                                          columns=section_AB_abs.columns)
-            
-            # Add regular edges A → B (positive correlations ONLY)
-            row_nodes = section_AB_pos.index.tolist()
-            col_nodes = section_AB_pos.columns.tolist()
-            
-            if len(row_nodes) > 0 and len(col_nodes) > 0:
-                # Only add edges where positive correlation exists (not zero)
-                complete_adj.loc[row_nodes, col_nodes] += section_AB_pos.to_numpy()
-                reg_edges = (section_AB_pos > 0).sum().sum()
-                inter_count += reg_edges
-                
-                # Add shadow edges A_neg → B_neg (positive correlations in shadow space, filter basis)
-                regular_rows = [r for r in row_nodes if not any(r.startswith(b) for b in basis_names)]
-                regular_cols = [c for c in col_nodes if not any(c.startswith(b) for b in basis_names)]
-                
-                if len(regular_rows) > 0 and len(regular_cols) > 0:
-                    shadow_rows = [r + "_neg" for r in regular_rows]
-                    shadow_cols = [c + "_neg" for c in regular_cols]
-                    shadow_weights = section_AB_pos.loc[regular_rows, regular_cols]
-                    
-                    complete_adj.loc[shadow_rows, shadow_cols] = shadow_weights.to_numpy()
-                    inter_count += (shadow_weights > 0).sum().sum()
-                
-                # Add negative correlation edges: Regular → Shadow (A → B_neg)
-                if len(regular_rows) > 0 and len(regular_cols) > 0:
-                    shadow_cols = [c + "_neg" for c in regular_cols]
-                    neg_entry_weights = section_AB_neg.loc[regular_rows, regular_cols]
-                    
-                    complete_adj.loc[regular_rows, shadow_cols] = neg_entry_weights.to_numpy()
-                    inter_count += (neg_entry_weights > 0).sum().sum()
-                
-                # Add negative correlation edges: Shadow → Regular (A_neg → B)
-                if len(regular_rows) > 0 and len(regular_cols) > 0:
-                    shadow_rows = [r + "_neg" for r in regular_rows]
-                    neg_exit_weights = section_AB_neg.loc[regular_rows, regular_cols]
-                    
-                    complete_adj.loc[shadow_rows, regular_cols] = neg_exit_weights.to_numpy()
-                    inter_count += (neg_exit_weights > 0).sum().sum()
-    
-    print(f"  Total inter-layer edges: {inter_count}")
-    
-    # Step 5: Verify gamma parameter is correctly applied
-    print("\n[STEP 5] Verifying gamma parameter...")
-    print("  Checking row sums for regular nodes (should sum to ~1.0)...")
-    
-    # Sample some regular nodes and check their probabilities
-    sample_regular_nodes = [n for n in regular_nodes if n not in basis_names][:10]
-    gamma_violations = 0
-    
-    for node in sample_regular_nodes:
-        row = complete_adj.loc[node, :]
-        
-        # Get positive correlation edges (to regular space)
-        regular_targets = [c for c in complete_adj.columns if not c.endswith('_neg') and row[c] > 0]
-        regular_prob = row[regular_targets].sum()
-        
-        # Get negative correlation edges (to shadow space)
-        shadow_targets = [c for c in complete_adj.columns if c.endswith('_neg') and row[c] > 0]
-        shadow_prob = row[shadow_targets].sum()
-        
-        total_prob = regular_prob + shadow_prob
-        
-        if total_prob > 0:
-            actual_gamma = shadow_prob / total_prob if total_prob > 0 else 0
-            if abs(actual_gamma - gamma) > 0.01 and shadow_prob > 0:
-                gamma_violations += 1
-                if gamma_violations <= 3:  # Only print first few
-                    print(f"    {node}: P(regular)={regular_prob:.4f}, P(shadow)={shadow_prob:.4f}, "
-                          f"gamma={actual_gamma:.4f} (expected {gamma:.4f})")
-    
-    if gamma_violations == 0:
-        print(f"  ✓ Gamma parameter correctly applied: P(negative jump) = {gamma:.3f}")
-    else:
-        print(f"  ⚠ Found {gamma_violations} nodes with gamma deviations")
-    
-    # Step 6: Final statistics
+
+    # Regular -> Regular (positive)
+    complete_adj.loc[regular_nodes, regular_nodes] = pos_adj.values
+
+    # Regular -> Shadow (negative)
+    complete_adj.loc[regular_nodes, shadow_nodes] = neg_adj.loc[regular_nodes, non_basis_nodes].values
+
+    # Shadow -> Shadow (positive)
+    complete_adj.loc[shadow_nodes, shadow_nodes] = pos_adj.loc[non_basis_nodes, non_basis_nodes].values
+
+    # Shadow -> Regular (negative)
+    complete_adj.loc[shadow_nodes, non_basis_nodes] = neg_adj.loc[non_basis_nodes, non_basis_nodes].values
+
+    # Step 4: Final statistics
     print("\n" + "=" * 80)
     print("SHADOW NETWORK - FINAL STATISTICS")
     print("=" * 80)
@@ -697,7 +495,46 @@ def create_shadow_network_multigraph(
     print(f"Non-zero edges: {(complete_adj != 0).sum().sum()}")
     print(f"Edge density: {(complete_adj != 0).sum().sum() / (len(all_nodes) ** 2):.6f}")
     print(f"\nProbability parameters:")
-    print(f"  Gamma (P(negative jump)): {gamma}")
-    print(f"  1-Gamma (P(positive correlation)): {1-gamma}")
-    
+    print("  P(negative jump from a node): sum(negative edge weights) / sum(total edge weights)")
+    print("  P(positive stay in current sign-space): complementary per-node proportion")
+
     return complete_adj
+
+
+def create_shadow_network_multigraph_lasso(
+    std_data_dict,
+    edge_fn_inter,
+    gamma=0.01,
+    alpha=0.1,
+    start='e3',
+    end='e5',
+    lasso_lambda=0.01,
+):
+    """
+    Build a shadow multi-layer graph using Lasso intra-layer edges.
+
+    This follows the same process as create_shadow_network_multigraph:
+    1) Generate Lasso intra-layer adjacency + sign matrices.
+    2) Pass them into the existing shadow-network constructor.
+    """
+    from .generate_graph_internal import lasso_single_graph
+
+    intra_graphs, sign_matrices = lasso_single_graph(
+        std_data_dict,
+        edge_fn=None,
+        start=start,
+        end=end,
+        return_signs=True,
+        lasso_lambda=lasso_lambda,
+    )
+
+    return create_shadow_network_multigraph(
+        std_data_dict=std_data_dict,
+        intra_graphs=intra_graphs,
+        sign_matrices=sign_matrices,
+        edge_fn_inter=edge_fn_inter,
+        gamma=gamma,
+        alpha=alpha,
+        start=start,
+        end=end,
+    )

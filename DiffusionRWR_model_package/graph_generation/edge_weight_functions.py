@@ -37,6 +37,17 @@ def cor_exponential_abs_inter(vec_a, vec_b, sigma=0.05):
     corr = np.abs(np.corrcoef(vec_a, vec_b)[0, 1])
     return np.exp(-(1 - corr) / sigma)
 
+
+def cor_abs_inter(vec_a, vec_b):
+    """
+    Inter-layer edge weight using plain absolute correlation.
+    Takes two vectors (one from each layer) and returns |corr(vec_a, vec_b)|.
+    """
+    corr = np.corrcoef(vec_a, vec_b)[0, 1]
+    if not np.isfinite(corr):
+        return 0.0
+    return float(np.abs(corr))
+
 def cor_gaussian_abs(combined_data, sigma=0.05):
     """
     Generate edge weights based on absolute correlation with Gaussian kernel.

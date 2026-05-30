@@ -4,6 +4,8 @@ from itertools import product
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from sklearn.linear_model import Lasso
+from sklearn.linear_model import Lasso
 
 from ..data_sorting import load_data, std_data_dict
 
@@ -48,6 +50,102 @@ def test_adjacency_symmetry(adjacency, atol=1e-8, rtol=1e-5):
         "shape": tuple(matrix.shape),
     }
 
+
+def test_adjacency_positive_semidefinite(adjacency, atol=1e-8):
+    """
+    Test whether an adjacency matrix is positive semi-definite.
+
+    Parameters
+    ----------
+    adjacency : np.ndarray or pd.DataFrame
+        Square adjacency matrix.
+    atol : float
+        Absolute tolerance for eigenvalue check (minimum eigenvalue >= -atol).
+
+    Returns
+    -------
+    dict
+        {
+            "is_positive_semidefinite": bool,
+            "min_eigenvalue": float,
+            "max_eigenvalue": float,
+            "condition_number": float,
+            "shape": tuple[int, int]
+        }
+    """
+    if isinstance(adjacency, pd.DataFrame):
+        matrix = adjacency.to_numpy(dtype=float, copy=False)
+    else:
+        matrix = np.asarray(adjacency, dtype=float)
+
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError(f"adjacency must be a square 2D matrix, got shape {matrix.shape}")
+
+    # Ensure symmetry for eigenvalue computation
+    matrix = (matrix + matrix.T) / 2
+
+    eigvals = np.linalg.eigvals(matrix)
+    eigvals = np.real(eigvals)  # Take real part in case of numerical issues
+
+    min_eigenvalue = float(np.min(eigvals))
+    max_eigenvalue = float(np.max(eigvals))
+    is_positive_semidefinite = bool(min_eigenvalue >= -atol)
+
+    # Condition number (largest / smallest positive eigenvalue)
+    positive_eigvals = eigvals[eigvals > atol]
+    if positive_eigvals.size > 0:
+        condition_number = float(np.max(positive_eigvals) / np.min(positive_eigvals))
+    else:
+        condition_number = np.inf
+
+    return {
+        "is_positive_semidefinite": is_positive_semidefinite,
+        "min_eigenvalue": min_eigenvalue,
+        "max_eigenvalue": max_eigenvalue,
+        "condition_number": condition_number,
+        "shape": tuple(matrix.shape),
+    }
+
+
+def get_adjacency_element_range(adjacency):
+    """
+    Get the range (min, max) of elements in the adjacency matrix.
+
+    Parameters
+    ----------
+    adjacency : np.ndarray or pd.DataFrame
+        Adjacency matrix.
+
+    Returns
+    -------
+    dict
+        {
+            "min_value": float,
+            "max_value": float,
+            "range": float,
+            "has_nan": bool,
+            "has_inf": bool
+        }
+    """
+    if isinstance(adjacency, pd.DataFrame):
+        matrix = adjacency.to_numpy(dtype=float, copy=False)
+    else:
+        matrix = np.asarray(adjacency, dtype=float)
+
+    min_value = float(np.nanmin(matrix))
+    max_value = float(np.nanmax(matrix))
+    range_value = max_value - min_value
+    has_nan = bool(np.any(np.isnan(matrix)))
+    has_inf = bool(np.any(np.isinf(matrix)))
+
+    return {
+        "min_value": min_value,
+        "max_value": max_value,
+        "range": range_value,
+        "has_nan": has_nan,
+        "has_inf": has_inf,
+    }
+
 def f(omega, X, tau):
     """Regression loss"""
     p = X.shape[1]
@@ -67,11 +165,6 @@ def g(omega, tau, lam):
         idx = np.arange(p) != j
         s += lam * tau[j] * np.sum(np.abs(omega[idx, j]))
     return s
-
-
-def update_tau(omega):
-    """tau_j = 1 / omega_jj"""
-    return 1 / np.diag(omega)
 
 
 def PI(omega, alpha=1e-6):
@@ -105,77 +198,159 @@ def next_omega(omega, gamma, U, grad_f):
     return PI(omega_next)
 
 
-def _soft_threshold_offdiag(omega, step_size, tau, lam):
-    """Column-wise weighted soft-thresholding on off-diagonal entries."""
-    out = omega.copy()
-    p = omega.shape[0]
+import numpy as np
+
+def prox_g_over_eta(Z, tau_squared, lam, eta):
+    """
+    Proximal operator of g/eta applied elementwise.
+
+    Parameters:
+        Z : (p, p) matrix  (this is V / eta)
+        tau_hat_sq : (p,) vector of τ̂_j^2
+        lam : (p,) or scalar λ_j
+        eta : scalar
+
+    Returns:
+        prox matrix of same shape
+    """
+    p = Z.shape[0]
+    prox = np.zeros_like(Z)
+
+    for j in range(p):
+        # Diagonal
+        prox[j, j] = 1.0 / tau_squared[j]
+
+        # Off-diagonal
+        for k in range(p):
+            if k == j:
+                continue
+            
+            threshold = tau_squared[j] * lam / eta
+            prox[k, j] = np.sign(Z[k, j]) * max(abs(Z[k, j]) - threshold, 0.0)
+
+    return prox
+
+
+def dual_update(U_k, Omega_k, Omega_k1, grad_k, grad_k1, eta, gamma, tau_squared, lam):
+    """
+    Perform the dual update step.
+
+    Parameters:
+        U_k        : current dual variable (p x p)
+        Omega_k    : Ω^{(k)}
+        Omega_k1   : Ω^{(k+1)}
+        grad_k     : ∇f(Ω^{(k)})
+        grad_k1    : ∇f(Ω^{(k+1)})
+        eta, gamma : step sizes
+        tau_squared : vector (p,)
+        lam        : scalar or vector (p,)
+
+    Returns:
+        U_{k+1}
+    """
+
+    # Step 1: compute V^{(k+1)}
+    V = (
+        U_k
+        + eta * (
+            2 * Omega_k1 - Omega_k
+            + gamma * (grad_k - grad_k1)
+        )
+    )
+
+    # Step 2: proximal step via Moreau identity
+    Z = V / eta
+    prox = prox_g_over_eta(Z, tau_squared, lam, eta)
+
+    U_k1 = V - eta * prox
+
+    return U_k1
+
+
+def initialize_omega_lasso(X, lam=0.1, max_iter_inner=100):
+    """
+    Column-wise Lasso regression using sklearn.
+    Solves: min_w (1/2n)||X_j - X_{-j} w||^2 + lam ||w||_1
+    """
+    n, p = X.shape
+    omega = np.eye(p)
+    thetas= np.zeros((p, p))
+    tau_squared = np.zeros(p)
+    
     for j in range(p):
         idx = np.arange(p) != j
-        threshold = step_size * lam * tau[j]
-        values = out[idx, j]
-        out[idx, j] = np.sign(values) * np.maximum(np.abs(values) - threshold, 0.0)
-    out = 0.5 * (out + out.T)
-    return out
+        
+        X_j = X[:, j]
+        X_rest = X[:, idx]
+        
+        # sklearn uses (1/2n)||y - Xw||^2 + alpha ||w||_1
+        model = Lasso(alpha=lam, fit_intercept=False, max_iter=max_iter_inner)
+        model.fit(X_rest, X_j)
+        
+        thetas[idx, j] = model.coef_
+
+        # Compute residual variance for tau_j
+        residuals = X_j - X_rest @ model.coef_
+        tau_squared[j] = np.mean(residuals**2)
+
+        omega[idx, j] = -thetas[idx, j] / max(tau_squared[j], 1e-6)  # Avoid division by zero
+        omega[j,j] = 1.0 / max(tau_squared[j], 1e-6)  # Diagonal entry for precision
+    
+    return omega, tau_squared
 
 
-def prox_g_star(U, tau, lam):
-    p = len(tau)
-    U_new = U.copy()
-    for j in range(p):
-        U_new[:, j] = np.clip(U[:, j], -lam * tau[j], lam * tau[j])
-    return U_new
-
-
-def next_U(U, omega_new, omega_old, grad_old, grad_new, tau, eta, gamma, lam):
-    """Dual update"""
-    Z = (
-        U
-        + eta * (2 * omega_new - omega_old)
-        + gamma * eta * (grad_old - grad_new)
-    )
-    return prox_g_star(Z, tau, lam)
-
-
-def proximal_precision(X, lam=0.1, gamma=0.01, eta=0.5, max_iter=100):
+def proximal_precision(X, lam=0.1, gamma=0.01, eta=0.5, max_iter=100, return_omega=False, show_ls_loss=False):
     """
-    Main proximal splitting solver
+    Proximal splitting solver with dual variables for SPD-Lasso estimation.
+    
+    Solves: min_omega f(omega) + g(omega) subject to omega in SPD_cone
+    where f(omega) = regression loss, g(omega) = lambda * L1 penalty
+    
+    Uses alternating primal-dual updates with eta as dual step parameter.
     """
     _, p = X.shape
 
-    omega = np.eye(p)
-
+    # Initialize omega using lasso regression
+    omega, tau_squared = initialize_omega_lasso(X, lam=lam, max_iter_inner=10000)
+    
+    # Initialize dual variable
+    U = np.zeros((p, p))
+    
     losses = []
-    step_size = float(gamma)
-
-    for _ in range(max_iter):
-        tau = update_tau(omega)
-        grad = gradient_f(omega, X, tau)
-        current_loss_fixed_tau = f(omega, X, tau) + g(omega, tau, lam)
-
-        local_step = step_size
-        omega_candidate = omega
-
-        for _ in range(20):
-            trial = omega - local_step * grad
-            trial = _soft_threshold_offdiag(trial, local_step, tau, lam)
-            trial = PI(trial)
-
-            trial_loss_fixed_tau = f(trial, X, tau) + g(trial, tau, lam)
-
-            if np.isfinite(trial_loss_fixed_tau) and trial_loss_fixed_tau <= current_loss_fixed_tau:
-                omega_candidate = trial
-                break
-
-            local_step *= 0.5
-
-        omega = omega_candidate
-        step_size = min(max(local_step * 1.05, 1e-8), max(float(gamma), 1e-8))
-
-        tau_eval = update_tau(omega)
-        losses.append(f(omega, X, tau_eval) + g(omega, tau_eval, lam))
-    T = np.diag(np.sqrt(update_tau(omega)))
-    Q = -T @ omega @ T
-    return Q, losses
+    ls_losses = []
+    print("starting proximal solver...")
+    for iteration in range(max_iter):
+        grad_old = gradient_f(omega, X, tau_squared)
+        
+        # Primal update
+        omega_old = omega.copy()
+        omega = next_omega(omega, gamma, U, grad_old)
+        omega = PI(omega, alpha=1e-6)
+        
+        grad_new = gradient_f(omega, X, tau_squared)
+        
+        # Dual update (using eta)
+        U = dual_update(U, omega_old, omega, grad_old, grad_new, eta, gamma, tau_squared, lam)
+        
+        # Compute loss
+        ls_loss = f(omega, X, tau_squared)
+        l1_loss = g(omega, tau_squared, lam)
+        total_loss = ls_loss + l1_loss
+        
+        losses.append(total_loss)
+        ls_losses.append(ls_loss)
+        
+        if show_ls_loss:
+            print(f"Iter {iteration + 1}: LS loss: {ls_loss:.6f}, L1 loss: {l1_loss:.6f}, Total: {total_loss:.6f}")
+        if iteration > 0 and abs(losses[-2] - losses[-1]) < 1e-6:
+            print(f"Convergence reached at iteration {iteration + 1}.")
+            break
+    if return_omega:
+        return omega, losses
+    else:
+        T = np.diag(np.sqrt(tau_squared))
+        Q = -T @ omega @ T
+        return Q, losses
 
 
 def run_proximal_on_rna_data(
@@ -442,20 +617,92 @@ def run_spd_lasso_symmetry_check_on_rna_ai(
 
 
 def main():
+    lam = 0.5
+    
+    # Test Q (adjacency matrix)
     adjacency, losses, report = run_spd_lasso_symmetry_check_on_rna_ai(
         top_n_genes=None,
-        lam=0.001,
+        lam=lam,
         gamma=0.01,
         eta=0.5,
         max_iter=100,
     )
 
-    print("\nSPD-Lasso symmetry check on std_data_dict['rna_ai']")
-    print(f"Adjacency shape: {adjacency.shape}")
+    # Test omega (precision matrix)
+    omega, losses_omega = proximal_precision(
+        std_data_dict["rna_ai"].T.to_numpy(dtype=float),
+        lam=lam,
+        gamma=0.01,
+        eta=0.5,
+        max_iter=1000,
+        return_omega=True,
+        show_ls_loss=True,
+    )
+
+    # Get X for computing loss components
+    X = std_data_dict["rna_ai"].T.to_numpy(dtype=float)
+    tau = 1 / np.diag(omega)
+    
+    # Compute loss components for omega
+    f_value = f(omega, X, tau)
+    g_value = g(omega, tau, lam)
+    total_loss = f_value + g_value
+
+    # Additional tests for Q
+    psd_report_q = test_adjacency_positive_semidefinite(adjacency)
+    range_report_q = get_adjacency_element_range(adjacency)
+
+    # Additional tests for omega
+    psd_report_omega = test_adjacency_positive_semidefinite(omega)
+    range_report_omega = get_adjacency_element_range(omega)
+
+    print("\nSPD-Lasso tests on std_data_dict['rna_ai']")
+    print("=" * 50)
+    print("ADJACENCY MATRIX (Q = -T @ omega @ T):")
+    print(f"Shape: {adjacency.shape}")
     print(f"Iterations: {len(losses)}")
     print(f"Final loss: {report['final_loss']:.6f}")
-    print(f"Symmetric: {report['is_symmetric']}")
-    print(f"Max |A - A^T|: {report['max_abs_asymmetry']:.6e}")
+    print()
+    print("Symmetry check:")
+    print(f"  Symmetric: {report['is_symmetric']}")
+    print(f"  Max |A - A^T|: {report['max_abs_asymmetry']:.6e}")
+    print()
+    print("Positive semi-definite check:")
+    print(f"  PSD: {psd_report_q['is_positive_semidefinite']}")
+    print(f"  Min eigenvalue: {psd_report_q['min_eigenvalue']:.6e}")
+    print(f"  Max eigenvalue: {psd_report_q['max_eigenvalue']:.6e}")
+    print(f"  Condition number: {psd_report_q['condition_number']:.6e}")
+    print()
+    print("Element range:")
+    print(f"  Min value: {range_report_q['min_value']:.6e}")
+    print(f"  Max value: {range_report_q['max_value']:.6e}")
+    print(f"  Range: {range_report_q['range']:.6e}")
+    print(f"  Has NaN: {range_report_q['has_nan']}")
+    print(f"  Has Inf: {range_report_q['has_inf']}")
+    print()
+    print("=" * 50)
+    print("PRECISION MATRIX (omega):")
+    print(f"Shape: {omega.shape}")
+    print(f"Iterations: {len(losses_omega)}")
+    print(f"Final loss: {losses_omega[-1]:.6f}")
+    print()
+    print("Loss components (lam={}):".format(lam))
+    print(f"  Least squares loss f(omega): {f_value:.6f}")
+    print(f"  L1 penalty g(omega): {g_value:.6f}")
+    print(f"  Total loss: {total_loss:.6f}")
+    print()
+    print("Positive semi-definite check:")
+    print(f"  PSD: {psd_report_omega['is_positive_semidefinite']}")
+    print(f"  Min eigenvalue: {psd_report_omega['min_eigenvalue']:.6e}")
+    print(f"  Max eigenvalue: {psd_report_omega['max_eigenvalue']:.6e}")
+    print(f"  Condition number: {psd_report_omega['condition_number']:.6e}")
+    print()
+    print("Element range:")
+    print(f"  Min value: {range_report_omega['min_value']:.6e}")
+    print(f"  Max value: {range_report_omega['max_value']:.6e}")
+    print(f"  Range: {range_report_omega['range']:.6e}")
+    print(f"  Has NaN: {range_report_omega['has_nan']}")
+    print(f"  Has Inf: {range_report_omega['has_inf']}")
 
 
 if __name__ == "__main__":
