@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "DiffusionRWR_model_package"
 version = "0.1"
-dependencies = ["numpy", "pandas"]
+dependencies = ["numpy", "pandas", "scikit-learn"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["DiffusionRWR_model_package"]
