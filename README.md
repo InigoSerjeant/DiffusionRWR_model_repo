@@ -1,86 +1,187 @@
 # DiffusionRWR Model
 
-A multi-layer graph random walk model for analyzing biological data trajectories across different histone modifications and RNA expression.
+Notebook-first workflow for building and analyzing multi-layer diffusion graphs from RNA and histone trajectories.
 
-## Overview
+3D interactive plot outputs are saved in the `Paper_results/` folder.
 
-This package implements a Random Walk with Restart (RWR) model on multi-layer graphs to analyze possible gene causation trajectories that causes a change of cell state.
+## What this README is for
 
+This guide walks you through `implementation.ipynb` in execution order.
+If you want to reproduce the full analysis and outputs, run the notebook cells from top to bottom once, then adjust parameters in the marked cells.
 
-## Features
+## Quick setup
 
-- **Multi-layer graph construction** with intra-layer and inter-layer connections
-- **Fast RWR implementation** using Numba JIT compilation (20-50x speedup)
-- **3D PCA visualization** of visit frequencies and trajectories
-- **Flexible edge weight functions** (correlation-based with power transformation)
-- **Trajectory analysis** with random sampling and visualization
-
-## Installation
+1. Open this folder in VS Code/Jupyter.
+2. Select a Python environment with the required packages.
+3. Install dependencies if needed:
 
 ```bash
-# Clone the repository
-git clone <your-repo-url>
-cd DiffusionRWR_model_repo
-
-# Install dependencies
-pip install numpy pandas scikit-learn plotly numba matplotlib
+pip install numpy pandas scikit-learn plotly numba matplotlib networkx
 ```
 
-## Usage
+## Primary notebook
 
-Run the complete pipeline:
+- `implementation.ipynb`
 
-```bash
-python -m DiffusionRWR_model_package.main
-```
+## Run order for implementation.ipynb
 
-### Configuration
+### 1) Load processed datasets
 
-Edit parameters in `main.py`:
+Runs:
+- `load_and_process_modelled_data(histone_dataset_filter="all")`
 
-- `USE_FAST_RWR`: Toggle between fast (Numba) or slow RWR
-- `edge_fn_intra`: Edge weight function for intra-layer connections
-- `edge_fn_inter`: Edge weight function for inter-layer connections
-- `start` / `end`: Basis vectors for start/target nodes
-- `n_simulations`: Number of random walk simulations
-- `n_trajectories`: Number of trajectories to visualize
+Output:
+- `datasets` dictionary containing `rna_ai`, `k9me2`, `k20me3`, `k27me3`.
 
-## Project Structure
+### 2) Set graph hyperparameters
 
-```
-DiffusionRWR_model_package/
-├── graph_generation/
-│   ├── generate_graph_internal.py  # Intra-layer graph generation
-│   ├── generate_multi_graph.py     # Multi-layer graph assembly
-│   └── edge_weight_functions.py    # Edge weight computation
-├── data_sorting/
-│   └── data_sorting.py             # Data loading and preprocessing
-├── run_RWR/
-│   ├── slow_RWR.py                 # Standard RWR implementation
-│   └── numba_RWR.py                # Fast Numba-optimized RWR
-├── model_analysis/
-│   └── PCA_frequency_plot.py       # Visualization functions
-├── data/
-│   └── Modelled/                   # Data files (CSV format)
-└── main.py                          # Main pipeline script
-```
+Defines:
+- `sigma_exp`
+- `sigma_gaussian`
+- `lambda_reg`
+- `keys`
 
-## Data Format
+Tip:
+- Change these first if you want a new experimental run.
 
-Input data should be CSV files with:
-- Gene names as row indices
-- Time points as columns (e.g., '0.0', '1.0', '2.0', '3.0', '4.0')
-- Row-wise standardized expression values
+### 3) Build EXP and GAUSSIAN single-layer graphs
 
-## Output
+Uses:
+- `generate_single_layer_graphs`
+- `cor_exponential_abs`
+- `cor_gaussian_abs`
 
-The pipeline generates an interactive 3D Plotly visualization showing:
-- Gene nodes colored by dataset (k9me2, k20me3, RNA)
-- Node sizes proportional to visit frequency
-- Basis vectors (start/target points)
-- Sampled random walk trajectories
+Output:
+- `single_layer_graphs_exp`, `single_layer_signs_exp`
+- `single_layer_graphs_gaussian`, `single_layer_signs_gaussian`
 
+### 4) Build SPD-Lasso single-layer graphs and basis utilities
 
+Defines helper functions:
+- `_build_standard_basis_map`
+- `set_spd_basis_connections`
+
+Uses:
+- `lasso_single_graph`
+
+Output:
+- `single_layer_graphs_spd`, `single_layer_signs_spd`
+- Base copies: `single_layer_graphs_spd_base`, `single_layer_signs_spd_base`
+
+### 5) Toggle basis-node connections (fast reconfiguration)
+
+Set:
+- `spd_basis_action`
+- `spd_basis_nodes`
+- `spd_basis_top_k`
+- `spd_basis_edge_weight`
+
+Then rerun this section to add/remove basis links without rerunning lasso.
+
+### 6) Build shadow multigraph
+
+Defines:
+- `build_shadow_multigraph`
+
+Uses:
+- `create_shadow_network_multigraph`
+- `cor_abs_inter`
+
+Output:
+- `shadow_multigraph_spd` (and optional exp/gaussian variants).
+
+### 7) Compute centrality tables
+
+Defines:
+- `drop_neg_suffix`
+- `compute_centralities`
+
+Output:
+- `centrality_scores` with PageRank and eigenvector centrality.
+
+### 8) 3D PCA projection and score plotting
+
+Defines:
+- `build_pca_projection_map`
+- `plot_node_scores_on_pca`
+
+Default example output:
+- `Paper_results/pca_pagerank_<graph>.html`
+
+### 9) Start-to-end path importance
+
+Defines:
+- `start_to_end_path`
+
+Output:
+- Importance series and PCA export:
+- `Paper_results/pca_start_to_end_<...>.html`
+
+### 10) Local neighbourhood importance
+
+Defines:
+- `local_neighbourhood`
+
+Output:
+- Local importance series and PCA export:
+- `Paper_results/pca_local_neighbourhood_<...>.html`
+
+### 11) Top-centrality static network figure
+
+Defines:
+- `visualize_top_centrality_networkx`
+
+Output:
+- PNG export in `Paper_results/top_centrality_network_<...>.png`.
+
+### 12) Histone-to-RNA cluster comparison
+
+Defines:
+- `cluster_comparison`
+- `map_histone_scores_to_pca_nodes`
+- `map_rna_gene_scores_to_pca_nodes`
+
+Output:
+- Histone and RNA closeness tables.
+- Combined PCA export:
+- `Paper_results/pca_cluster_histone_rna_combined_<...>.html`
+
+### 13) Top-N trajectory overlays (histone + RNA)
+
+Defines:
+- `to_base_gene_name`
+- `infer_time_axis_from_columns`
+- `trajectories_per_gene`
+- `plot_top_n_histone_rna_trajectories`
+
+Output:
+- Interactive trajectory export:
+- `Paper_results/top_<N>_histone_rna_trajectories_<...>.html`
+
+## Recommended rerun workflow when tuning
+
+If you change only plotting settings:
+- Rerun sections 8-13.
+
+If you change diffusion/source/target parameters:
+- Rerun sections 9-13.
+
+If you change graph construction parameters (`sigma_*`, `lambda_reg`, basis settings):
+- Rerun sections 3-13.
+
+If you change data loading/preprocessing:
+- Rerun everything from section 1.
+
+## Main output folder
+
+- `Paper_results/` contains exported HTML and PNG files generated by the notebook examples.
+
+## Package modules used by the notebook
+
+- `DiffusionRWR_model_package.data_sorting`
+- `DiffusionRWR_model_package.graph_generation.generate_graph_internal`
+- `DiffusionRWR_model_package.graph_generation.generate_multi_graph`
+- `DiffusionRWR_model_package.graph_generation.edge_weight_functions`
 
 ## Author
 
