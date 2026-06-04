@@ -15,79 +15,6 @@ const sortSelectEl = document.getElementById("sortSelect");
 const themeToggleEl = document.getElementById("themeToggle");
 const themeToggleTextEl = document.getElementById("themeToggleText");
 const templateEl = document.getElementById("plotCardTemplate");
-const apaCitationEl = document.getElementById("apaCitation");
-const bibtexCitationEl = document.getElementById("bibtexCitation");
-const copyApaEl = document.getElementById("copyApa");
-const copyBibtexEl = document.getElementById("copyBibtex");
-
-const SITE_TITLE = "DiffusionRWR Scientific Plot Atlas";
-const REPO_URL = "https://github.com/InigoSerjeant/DiffusionRWR_model_repo";
-
-function deriveSiteUrl() {
-  const u = new URL(window.location.href);
-  if (u.pathname.endsWith("index.html")) {
-    u.pathname = u.pathname.slice(0, -"index.html".length);
-  }
-  u.search = "";
-  u.hash = "";
-  return u.toString();
-}
-
-function formatIsoDate(dateValue) {
-  const d = new Date(dateValue);
-  if (Number.isNaN(d.getTime())) {
-    return "n.d.";
-  }
-  return d.toISOString().slice(0, 10);
-}
-
-function formatAccessDate() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function buildCitations(manifest) {
-  const publishedDate = formatIsoDate(manifest.generated_at);
-  const accessDate = formatAccessDate();
-  const siteUrl = deriveSiteUrl();
-  const total = Number.isFinite(manifest.total_plots) ? manifest.total_plots : state.plots.length;
-
-  const apa = [
-    "Serjeant, I. (" + publishedDate + "). ",
-    SITE_TITLE + " [Interactive scientific dashboard; " + total + " embedded plots]. ",
-    "GitHub Pages. " + siteUrl,
-  ].join("");
-
-  const bibtex = [
-    "@misc{serjeant_diffusionrwr_plot_atlas_" + publishedDate.slice(0, 4) + ",",
-    "  author       = {Serjeant, Inigo},",
-    "  title        = {" + SITE_TITLE + "},",
-    "  year         = {" + publishedDate.slice(0, 4) + "},",
-    "  howpublished = {GitHub Pages},",
-    "  note         = {Interactive scientific dashboard; " + total + " embedded plots. Accessed: " + accessDate + "},",
-    "  url          = {" + siteUrl + "},",
-    "  repository   = {" + REPO_URL + "}",
-    "}",
-  ].join("\n");
-
-  apaCitationEl.textContent = apa;
-  bibtexCitationEl.textContent = bibtex;
-}
-
-async function copyText(text, buttonEl, label) {
-  try {
-    await navigator.clipboard.writeText(text);
-    const old = buttonEl.textContent;
-    buttonEl.textContent = label + " copied";
-    setTimeout(() => {
-      buttonEl.textContent = old;
-    }, 1200);
-  } catch (_) {
-    buttonEl.textContent = "Clipboard blocked";
-    setTimeout(() => {
-      buttonEl.textContent = label;
-    }, 1200);
-  }
-}
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
@@ -209,7 +136,6 @@ async function bootstrap() {
 
     const manifest = await response.json();
     state.plots = Array.isArray(manifest.plots) ? manifest.plots : [];
-    buildCitations(manifest);
 
     if (state.plots.length === 0) {
       statusEl.textContent = "No HTML plots found in Paper_results.";
@@ -238,14 +164,6 @@ sortSelectEl.addEventListener("change", (event) => {
 themeToggleEl.addEventListener("click", () => {
   const current = document.documentElement.getAttribute("data-theme");
   applyTheme(current === "dark" ? "light" : "dark");
-});
-
-copyApaEl.addEventListener("click", () => {
-  copyText(apaCitationEl.textContent, copyApaEl, "Copy APA");
-});
-
-copyBibtexEl.addEventListener("click", () => {
-  copyText(bibtexCitationEl.textContent, copyBibtexEl, "Copy BibTeX");
 });
 
 initTheme();
