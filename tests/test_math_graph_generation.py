@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from streamlit_app import build_adjacency
+from Dissertation.streamlit_app import build_adjacency
 from DiffusionRWR_model_package.graph_generation.edge_weight_functions import (
     cor_exponential_abs_inter,
     cor_gaussian_abs_inter,
