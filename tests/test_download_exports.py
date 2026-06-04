@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from streamlit_app import _build_export_zip, _json_safe
+from Dissertation.streamlit_app import _build_export_zip, _json_safe
 
 
 def test_json_safe_converts_path_numpy_and_collections():

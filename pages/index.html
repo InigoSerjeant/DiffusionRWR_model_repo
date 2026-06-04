@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DiffusionRWR Scientific Plot Atlas</title>
+    <meta
+      name="description"
+      content="Interactive scientific dashboard for browsing all HTML plots generated in Paper_results."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">DiffusionRWR Model Repo</p>
+        <h1>Scientific Plot Atlas</h1>
+        <p class="subtitle">
+          Auto-generated from <strong>Paper_results</strong>. New HTML plots appear
+          automatically after each push.
+        </p>
+      </div>
+      <button id="themeToggle" class="theme-toggle" aria-label="Toggle dark mode">
+        <span id="themeToggleText">Dark mode</span>
+      </button>
+    </header>
+
+    <section class="controls">
+      <label class="control search-control">
+        <span>Search plots</span>
+        <input id="searchInput" type="search" placeholder="Try pagerank, cluster, k27me3..." />
+      </label>
+      <label class="control">
+        <span>Sort</span>
+        <select id="sortSelect">
+          <option value="title-asc">Title A-Z</option>
+          <option value="title-desc">Title Z-A</option>
+          <option value="path-asc">Path A-Z</option>
+          <option value="path-desc">Path Z-A</option>
+        </select>
+      </label>
+      <div class="control stat-box">
+        <span>Visible plots</span>
+        <strong id="visibleCount">0</strong>
+      </div>
+      <div class="control stat-box">
+        <span>Total plots</span>
+        <strong id="totalCount">0</strong>
+      </div>
+    </section>
+
+    <section class="citation-panel" aria-label="Citation information">
+      <h2>Cite This Website</h2>
+      <p>
+        Use this citation in your paper. The access date updates automatically in your browser.
+      </p>
+      <div class="citation-grid">
+        <article>
+          <h3>APA</h3>
+          <pre id="apaCitation" class="citation-block"></pre>
+          <button id="copyApa" class="copy-btn" type="button">Copy APA</button>
+        </article>
+        <article>
+          <h3>BibTeX</h3>
+          <pre id="bibtexCitation" class="citation-block"></pre>
+          <button id="copyBibtex" class="copy-btn" type="button">Copy BibTeX</button>
+        </article>
+      </div>
+    </section>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <h2>Groups</h2>
+        <nav id="groupNav" class="group-nav" aria-label="Plot group navigation"></nav>
+      </aside>
+
+      <section>
+        <div id="status" class="status">Loading plot manifest...</div>
+        <div id="cards" class="cards"></div>
+      </section>
+    </main>
+
+    <template id="plotCardTemplate">
+      <article class="plot-card">
+        <header>
+          <h3 class="plot-title"></h3>
+          <p class="plot-meta"></p>
+          <a class="plot-open" target="_blank" rel="noopener noreferrer">Open standalone</a>
+        </header>
+        <div class="iframe-wrap">
+          <iframe loading="lazy" referrerpolicy="no-referrer" allowfullscreen></iframe>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
