@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this repository or website, please cite it as below."
+title: "DiffusionRWR Scientific Plot Atlas"
+abstract: "Interactive GitHub Pages dashboard that automatically aggregates and embeds DiffusionRWR Paper_results HTML plots."
+type: software
+authors:
+  - family-names: Serjeant
+    given-names: Inigo
+repository-code: "https://github.com/InigoSerjeant/DiffusionRWR_model_repo"
+url: "https://inigoserjeant.github.io/DiffusionRWR_model_repo/"
+license: "NOASSERTION"
+version: "1.0.0"
+date-released: "2026-06-04"
+keywords:
+  - diffusion
+  - random walk with restart
+  - multi-omics
+  - network biology
+  - plotly
+  - github pages
