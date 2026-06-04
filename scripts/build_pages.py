@@ -24,7 +24,7 @@ def build_manifest(site_root: Path) -> dict:
     for html_file in html_files:
         rel_path = html_file.relative_to(site_root).as_posix()
         parent_rel = html_file.parent.relative_to(paper_dir).as_posix()
-        group = "Root" if parent_rel == "." else parent_rel.replace("/", " / ")
+        group = "" if parent_rel == "." else parent_rel.replace("/", " / ")
 
         plots.append(
             {

@@ -16,6 +16,14 @@ const themeToggleEl = document.getElementById("themeToggle");
 const themeToggleTextEl = document.getElementById("themeToggleText");
 const templateEl = document.getElementById("plotCardTemplate");
 
+function normalizeGroup(groupValue) {
+  const raw = String(groupValue || "").trim();
+  if (!raw || raw === "." || raw.toLowerCase() === "root") {
+    return "";
+  }
+  return raw;
+}
+
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("theme", theme);
@@ -55,7 +63,7 @@ function filterPlots() {
 
   if (q) {
     filtered = filtered.filter((plot) => {
-      const haystack = `${plot.title} ${plot.path} ${plot.group}`.toLowerCase();
+      const haystack = `${plot.title} ${plot.path} ${plot.group || ""}`.toLowerCase();
       return haystack.includes(q);
     });
   }
@@ -64,7 +72,7 @@ function filterPlots() {
 }
 
 function renderGroups(plots) {
-  const groups = ["All", ...new Set(plots.map((p) => p.group))];
+  const groups = ["All", ...new Set(plots.map((p) => p.group).filter(Boolean))];
   groupNavEl.innerHTML = "";
 
   for (const group of groups) {
@@ -96,7 +104,7 @@ function createCard(plot, idx) {
 
   card.style.animationDelay = `${Math.min(idx, 10) * 40}ms`;
   title.textContent = plot.title;
-  meta.textContent = `${plot.group} | ${plot.path}`;
+  meta.textContent = plot.group ? `${plot.group} | ${plot.path}` : plot.path;
   link.href = plot.path;
   iframe.src = plot.path;
   iframe.title = plot.title;
@@ -135,7 +143,12 @@ async function bootstrap() {
     }
 
     const manifest = await response.json();
-    state.plots = Array.isArray(manifest.plots) ? manifest.plots : [];
+    state.plots = Array.isArray(manifest.plots)
+      ? manifest.plots.map((plot) => ({
+          ...plot,
+          group: normalizeGroup(plot.group),
+        }))
+      : [];
 
     if (state.plots.length === 0) {
       statusEl.textContent = "No HTML plots found in Paper_results.";
