@@ -205,10 +205,11 @@ def lasso_single_graph(std_data_dict, edge_fn, start = 'e3', end = 'e5', return_
     lasso_lambda = float(lasso_lambda)
     threshold = float(threshold)
     max_iter = 500
-    gamma = 0.1
-    eta = 5.0
+    gamma = 0.02
+    eta = 20
     print(f"SPD-Lasso regularization lambda: {lasso_lambda}")
-    
+    print(f"SPD-Lasso regularization gamma: {gamma}")
+    print(f"SPD-Lasso regularization eta: {eta}")
 
     adjacency_df_dict = {}
     sign_matrix_dict = {} if return_signs else None
